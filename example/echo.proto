@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package echo;
+option go_package = "github.com/yourusername/yourproject/echo";
+
+service EchoService {
+  // Unary call
+  rpc Echo(EchoRequest) returns (EchoResponse) {}
+  
+  // Server streaming
+  rpc EchoStream(EchoRequest) returns (stream EchoResponse) {}
+  
+  // Bidirectional streaming
+  rpc EchoBidiStream(stream EchoRequest) returns (stream EchoResponse) {}
+}
+
+message EchoRequest {
+  string message = 1;
+}
+
+message EchoResponse {
+  string message = 1;
+  int32 sequence = 2;
+}

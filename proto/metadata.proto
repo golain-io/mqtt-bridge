@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package bridge;
+option go_package = "bridge/proto";
+
+message MetadataFrame {
+  map<string, MetadataValues> metadata = 1;
+}
+
+message MetadataValues {
+  repeated string values = 1;
+} 
