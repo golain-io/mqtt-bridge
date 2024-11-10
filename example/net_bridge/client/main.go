@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/resolver"
 
 	bridge "github.com/golain-io/mqtt-bridge"
 	echo "github.com/golain-io/mqtt-bridge/example"
@@ -37,8 +38,13 @@ func main() {
 	// Create network bridge with unique client ID
 	netBridge := bridge.NewMQTTNetBridge(mqttClient, logger, "echo-client")
 
-	// Create gRPC client with appropriate timeouts and retry policy
-	ctx := context.Background()
+	/**
+	You could also use the deprecated grpc.Dial() function with the bridge client
+	This is supported as well, but since grpc-go is moving to the NewClient() +
+	Resolver style clients, we recommend using that approach (shown below).
+
+	Here is the Dial() version:
+
 	conn, err := grpc.Dial(
 		"echo-service",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -46,9 +52,30 @@ func main() {
 			return netBridge.Dial(ctx, addr)
 		}),
 	)
+
+	NOTE: with the dial approach, you don't need the `mqtt://` scheme prefix.
+	*/
+
+	// since we are using an "mqtt" scheme, we need to register the bridge as a resolver builder
+	// so that grpc is aware of it
+	resolver.Register(netBridge)
+
+	// Create gRPC client with appropriate timeouts and retry policy
+	ctx := context.Background()
+	conn, err := grpc.NewClient(
+		"mqtt://echo-service",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// alternatively, you can register the bridge as a resolver builder
+		// only for this client connection here:
+		// grpc.WithResolvers(netBridge),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			return netBridge.Dial(ctx, addr)
+		}),
+	)
 	if err != nil {
 		log.Fatal("Failed to dial server:", err)
 	}
+	conn.Connect()
 	defer conn.Close()
 
 	// Create echo client

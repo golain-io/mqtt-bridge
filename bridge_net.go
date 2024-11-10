@@ -13,6 +13,7 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/resolver"
 )
 
 // MQTTNetBridge implements net.Listener over MQTT
@@ -56,6 +57,30 @@ const (
 	connectMsg    = "connect"
 	connectAckMsg = "connect_ack"
 )
+
+type mqttResolver struct {
+	cc resolver.ClientConn
+}
+
+func (r *mqttResolver) ResolveNow(resolver.ResolveNowOptions) {}
+func (r *mqttResolver) Close()                                {}
+
+func (b *MQTTNetBridge) Scheme() string {
+	return "mqtt"
+}
+
+func (b *MQTTNetBridge) Build(target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOptions) (resolver.Resolver, error) {
+	cc.UpdateState(resolver.State{
+		Endpoints: []resolver.Endpoint{
+			{
+				Addresses: []resolver.Address{
+					{Addr: target.URL.Host},
+				},
+			},
+		},
+	})
+	return &mqttResolver{cc: cc}, nil
+}
 
 // NewMQTTNetBridge creates a new bridge that listens on a specific bridgeID
 func NewMQTTNetBridge(mqttClient mqtt.Client, logger *zap.Logger, bridgeID string) *MQTTNetBridge {
