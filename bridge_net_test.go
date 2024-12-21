@@ -31,7 +31,8 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 
 	// Create bridge listener
 	serverBridgeID := "test-server"
-	listener := NewMQTTNetBridge(serverClient, logger, serverBridgeID)
+	rootTopic := "test-root"
+	listener := NewMQTTNetBridge(serverClient, logger, serverBridgeID, WithRootTopic(rootTopic))
 	defer listener.Close()
 
 	// Channel to signal server is ready
@@ -69,7 +70,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 
 	// Create client bridge
 	clientBridgeID := "test-client"
-	clientBridge := NewMQTTNetBridge(clientClient, logger, clientBridgeID)
+	clientBridge := NewMQTTNetBridge(clientClient, logger, clientBridgeID, WithRootTopic(rootTopic))
 	defer clientBridge.Close()
 
 	// Connect to the server

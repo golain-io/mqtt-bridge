@@ -21,6 +21,7 @@ type MQTTNetBridge struct {
 	mqttClient mqtt.Client
 	logger     *zap.Logger
 	bridgeID   string // Our "listening address"
+	rootTopic  string
 
 	// Connection management
 	connections map[string]*MQTTNetBridgeConn
@@ -32,6 +33,12 @@ type MQTTNetBridge struct {
 	// Shutdown management
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+func WithRootTopic(rootTopic string) func(*MQTTNetBridge) {
+	return func(b *MQTTNetBridge) {
+		b.rootTopic = rootTopic
+	}
 }
 
 // MQTTAddr implements net.Addr for MQTT connections
@@ -46,12 +53,12 @@ func (a *MQTTAddr) String() string  { return a.address }
 // Update constants for topic patterns
 const (
 	// Handshake topics
-	handshakeRequestTopic  = "/bridge/handshake/%s/request/%s"  // serverID, clientID
-	handshakeResponseTopic = "/bridge/handshake/%s/response/%s" // serverID, clientID
+	handshakeRequestTopic  = "%s/bridge/handshake/%s/request/%s"  // serverID, clientID
+	handshakeResponseTopic = "%s/bridge/handshake/%s/response/%s" // serverID, clientID
 
 	// Session topics
-	sessionUpTopic   = "/bridge/session/%s/%s/up"   // serverID, sessionID
-	sessionDownTopic = "/bridge/session/%s/%s/down" // serverID, sessionID
+	sessionUpTopic   = "%s/bridge/session/%s/%s/up"   // serverID, sessionID
+	sessionDownTopic = "%s/bridge/session/%s/%s/down" // serverID, sessionID
 
 	// Message types
 	connectMsg    = "connect"
@@ -83,21 +90,26 @@ func (b *MQTTNetBridge) Build(target resolver.Target, cc resolver.ClientConn, op
 }
 
 // NewMQTTNetBridge creates a new bridge that listens on a specific bridgeID
-func NewMQTTNetBridge(mqttClient mqtt.Client, logger *zap.Logger, bridgeID string) *MQTTNetBridge {
+func NewMQTTNetBridge(mqttClient mqtt.Client, logger *zap.Logger, bridgeID string, opts ...func(*MQTTNetBridge)) *MQTTNetBridge {
 	logger.Info("Creating new MQTT bridge", zap.String("bridgeID", bridgeID))
 	ctx, cancel := context.WithCancel(context.Background())
 	bridge := &MQTTNetBridge{
 		mqttClient:  mqttClient,
 		logger:      logger,
 		bridgeID:    bridgeID,
+		rootTopic:   "", // will be set by opts
 		connections: make(map[string]*MQTTNetBridgeConn),
 		acceptCh:    make(chan *MQTTNetBridgeConn),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
 
+	for _, opt := range opts {
+		opt(bridge)
+	}
+
 	// Subscribe to handshake requests if we're a server
-	handshakeTopic := fmt.Sprintf("/bridge/handshake/%s/request/+", bridgeID)
+	handshakeTopic := fmt.Sprintf("%s/bridge/handshake/%s/request/+", bridge.rootTopic, bridge.bridgeID)
 	logger.Debug("Subscribing to handshake topic", zap.String("topic", handshakeTopic))
 	token := mqttClient.Subscribe(handshakeTopic, 0, bridge.handleHandshake)
 	if token.Wait() && token.Error() != nil {
@@ -140,7 +152,7 @@ func (b *MQTTNetBridge) Close() error {
 	b.connMu.Unlock()
 
 	// Unsubscribe from handshake topic
-	handshakeTopic := fmt.Sprintf("/bridge/handshake/%s/request/+", b.bridgeID)
+	handshakeTopic := fmt.Sprintf("%s/bridge/handshake/%s/request/+", b.rootTopic, b.bridgeID)
 	token := b.mqttClient.Unsubscribe(handshakeTopic)
 	token.Wait()
 
@@ -324,12 +336,12 @@ func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message)
 		zap.Int("bytes", len(msg.Payload())))
 
 	parts := strings.Split(msg.Topic(), "/")
-	if len(parts) != 6 {
+	if len(parts) != 8  {
 		b.logger.Error("Invalid topic format", zap.String("topic", msg.Topic()))
 		return
 	}
 
-	sessionID := parts[4]
+	sessionID := parts[6]
 
 	b.connMu.RLock()
 	conn, exists := b.connections[sessionID]
@@ -360,8 +372,8 @@ func (b *MQTTNetBridge) createNewConnection(sessionID string) *MQTTNetBridgeConn
 		readBuf:    make(chan []byte, 100),
 		localAddr:  b.Addr(),
 		remoteAddr: &MQTTAddr{network: "mqtt", address: sessionID},
-		upTopic:    fmt.Sprintf(sessionUpTopic, b.bridgeID, sessionID),
-		downTopic:  fmt.Sprintf(sessionDownTopic, b.bridgeID, sessionID),
+		upTopic:    fmt.Sprintf(sessionUpTopic, b.rootTopic, b.bridgeID, sessionID),
+		downTopic:  fmt.Sprintf(sessionDownTopic, b.rootTopic, b.bridgeID, sessionID),
 		role:       "server",
 	}
 
@@ -408,7 +420,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string) (net.Co
 		zap.String("clientID", clientID))
 
 	// Subscribe to handshake response
-	responseTopic := fmt.Sprintf(handshakeResponseTopic, targetBridgeID, clientID)
+	responseTopic := fmt.Sprintf(handshakeResponseTopic, b.rootTopic, targetBridgeID, clientID)
 	respChan := make(chan string, 1)
 
 	token := b.mqttClient.Subscribe(responseTopic, 0, func(_ mqtt.Client, msg mqtt.Message) {
@@ -424,7 +436,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string) (net.Co
 	defer b.mqttClient.Unsubscribe(responseTopic)
 
 	// Send connect request
-	requestTopic := fmt.Sprintf(handshakeRequestTopic, targetBridgeID, clientID)
+	requestTopic := fmt.Sprintf(handshakeRequestTopic, b.rootTopic, targetBridgeID, clientID)
 	token = b.mqttClient.Publish(requestTopic, 0, false, []byte(connectMsg))
 	if token.Wait() && token.Error() != nil {
 		return nil, fmt.Errorf("handshake request failed: %v", token.Error())
@@ -498,7 +510,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 		zap.String("payload", string(msg.Payload())))
 
 	parts := strings.Split(msg.Topic(), "/")
-	if len(parts) != 6 || parts[1] != "bridge" || parts[2] != "handshake" {
+	if len(parts) != 8 || parts[3] != "bridge" || parts[4] != "handshake" {
 		b.logger.Error("Invalid handshake topic format",
 			zap.String("topic", msg.Topic()),
 			zap.Int("parts", len(parts)))
@@ -506,13 +518,13 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 	}
 
 	msgType := string(msg.Payload())
-	clientID := parts[5]
+	clientID := parts[7]
 
 	b.logger.Debug("Parsed handshake request",
 		zap.String("msgType", msgType),
 		zap.String("clientID", clientID))
 
-	if parts[4] == "request" && msgType == connectMsg {
+	if parts[6] == "request" && msgType == connectMsg {
 		// Generate new session
 		sessionID := uuid.New().String()
 		b.logger.Debug("Creating new session",
@@ -528,7 +540,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 		}
 
 		// Send connection acknowledgment with session details
-		responseTopic := fmt.Sprintf(handshakeResponseTopic, b.bridgeID, clientID)
+		responseTopic := fmt.Sprintf(handshakeResponseTopic, b.rootTopic, b.bridgeID, clientID)
 		response := fmt.Sprintf("%s:%s:%s:%s", connectAckMsg, sessionID, conn.upTopic, conn.downTopic)
 
 		b.logger.Debug("Sending connect_ack",
@@ -555,6 +567,8 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 				zap.String("clientID", clientID))
 		default:
 			b.logger.Warn("Accept channel full, dropping connection",
+				zap.Int("total_connections", len(b.connections)),
+				zap.Int("accept_channel_size", len(b.acceptCh)),
 				zap.String("sessionID", sessionID))
 			conn.Close()
 		}
