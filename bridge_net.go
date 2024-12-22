@@ -430,7 +430,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string) (net.Co
 	token := b.mqttClient.Subscribe(responseTopic, 0, func(_ mqtt.Client, msg mqtt.Message) {
 		payload := b.hooks.OnMessageReceived(msg.Payload())
 		select {
-		case respChan <- string(payload):
+		case respChan <- UnsafeString(payload):
 		default:
 			b.logger.Warn("Response channel full")
 		}
@@ -516,8 +516,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 	payload = b.hooks.OnMessageReceived(payload)
 
 	b.logger.Debug("Received handshake message",
-		zap.String("topic", msg.Topic()),
-		zap.String("payload", string(payload)))
+		zap.String("topic", msg.Topic()))
 
 	parts := strings.Split(msg.Topic(), "/")
 	if len(parts) != 8 || parts[3] != "bridge" || parts[4] != "handshake" {
@@ -527,7 +526,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	msgType := string(payload)
+	msgType := UnsafeString(payload)
 	clientID := parts[7]
 
 	b.logger.Debug("Parsed handshake request",
