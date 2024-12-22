@@ -3,12 +3,14 @@ package hooks
 import (
 	"fmt"
 	"sync/atomic"
+
 	"go.uber.org/zap"
 
 	bridge "github.com/golain-io/mqtt-bridge"
 )
 
 // EchoHook implements BridgeHook interface to provide message logging functionality
+
 type EchoHook struct {
 	logger    *zap.Logger
 	isRunning atomic.Bool
@@ -19,20 +21,24 @@ type EchoHook struct {
 func NewEchoHook(logger *zap.Logger) *EchoHook {
 	return &EchoHook{
 		logger: logger,
-		id:     "net_bridge_hook",
+		id:     "echo_hook",
 	}
 }
 
 // OnMessageReceived logs the received message
-func (h *EchoHook) OnMessageReceived(msg []byte) error {
+func (h *EchoHook) OnMessageReceived(msg []byte) []byte {
 	if !h.isRunning.Load() {
-		return fmt.Errorf("hook %s is not running", h.id)
+		return msg
 	}
+
+	h.logger.Info("message received echo", zap.ByteString("message", msg))
+	fmt.Println("message received echo vednat", msg)
+	msg = msg[1:]
 
 	h.logger.Info("message received echo",
 		zap.ByteString("message", msg),
 		zap.String("hook_id", h.id))
-	return nil
+	return msg
 }
 
 // Provides indicates whether this hook provides the specified functionality

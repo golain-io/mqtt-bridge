@@ -14,7 +14,7 @@ const (
 
 // BridgeHook provides an interface for handling bridge-related events.
 type BridgeHook interface {
-	OnMessageReceived(msg []byte) error
+	OnMessageReceived(msg []byte) []byte
 	Provides(b byte) bool
 	Init(config any) error
 	Stop() error
@@ -31,18 +31,16 @@ type BridgeHooks struct {
 }
 
 // OnMessageReceived is called when a message is received from a bridge connection.
-func (h *BridgeHooks) OnMessageReceived(msg []byte) error {
+func (h *BridgeHooks) OnMessageReceived(msg []byte) []byte {
 	h.RLock()
 	defer h.RUnlock()
 
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnMessageReceived) {
-			if err := hook.OnMessageReceived(msg); err != nil {
-				return err
-			}
+			msg = hook.OnMessageReceived(msg)
 		}
 	}
-	return nil
+	return msg
 }
 
 // Len returns the number of hooks added.

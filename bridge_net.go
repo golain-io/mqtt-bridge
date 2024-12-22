@@ -335,14 +335,7 @@ func (c *MQTTNetBridgeConn) SetWriteDeadline(t time.Time) error {
 
 // handleIncomingData processes incoming MQTT messages
 func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message) {
-	payload := msg.Payload()
-
-	// Execute hooks when receiving data
-	err := b.hooks.OnMessageReceived(payload)
-	if err != nil {
-		b.logger.Error("Error processing message", zap.Error(err))
-		return
-	}
+	payload := b.hooks.OnMessageReceived(msg.Payload())
 
 	b.logger.Debug("Received incoming data",
 		zap.String("topic", msg.Topic()),
@@ -396,12 +389,7 @@ func (b *MQTTNetBridge) createNewConnection(sessionID string) *MQTTNetBridgeConn
 			return
 		}
 
-		payload := msg.Payload()
-		err := b.hooks.OnMessageReceived(payload)
-		if err != nil {
-			b.logger.Error("Error processing message", zap.Error(err))
-			return
-		}
+		payload := b.hooks.OnMessageReceived(msg.Payload())
 
 		b.logger.Debug("Server received data",
 			zap.String("sessionID", sessionID),
@@ -444,12 +432,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string) (net.Co
 	respChan := make(chan string, 1)
 
 	token := b.mqttClient.Subscribe(responseTopic, 0, func(_ mqtt.Client, msg mqtt.Message) {
-		payload := msg.Payload()
-		err := b.hooks.OnMessageReceived(payload)
-		if err != nil {
-			b.logger.Error("Error processing message", zap.Error(err))
-			return
-		}
+		payload := b.hooks.OnMessageReceived(msg.Payload())
 		select {
 		case respChan <- string(payload):
 		default:
@@ -534,11 +517,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 	payload := msg.Payload()
 
 	// Execute hooks when receiving data
-	err := b.hooks.OnMessageReceived(payload)
-	if err != nil {
-		b.logger.Error("Error processing message", zap.Error(err))
-		return
-	}
+	payload = b.hooks.OnMessageReceived(payload)
 
 	b.logger.Debug("Received handshake message",
 		zap.String("topic", msg.Topic()),

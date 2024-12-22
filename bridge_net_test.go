@@ -34,7 +34,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 	serverBridgeID := "test-server"
 	rootTopic := "/test-base/test"
 	listener := NewMQTTNetBridge(serverClient, logger, serverBridgeID, WithRootTopic(rootTopic))
-	listener.AddHook(NewNetBridgeHook(logger), nil)
+	listener.AddHook(NewEchoHook(logger), nil)
 	defer listener.Close()
 
 	// Channel to signal server is ready
@@ -172,42 +172,44 @@ func handleTestConnection(t *testing.T, conn io.ReadWriteCloser) {
 	}
 }
 
-
-
-// NetBridgeHook implements BridgeHook interface to provide message logging functionality
-type NetBridgeHook struct {
+// Hook from example/hooks/echo_hook.go
+type EchoHook struct {
 	logger    *zap.Logger
 	isRunning atomic.Bool
 	id        string
 }
 
-// NewNetBridgeHook creates a new LoggingHook instance
-func NewNetBridgeHook(logger *zap.Logger) *NetBridgeHook {
-	return &NetBridgeHook{
+// NewEchoHook creates a new LoggingHook instance
+func NewEchoHook(logger *zap.Logger) *EchoHook {
+	return &EchoHook{
 		logger: logger,
-		id:     "net_bridge_hook",
+		id:     "echo_hook",
 	}
 }
 
 // OnMessageReceived logs the received message
-func (h *NetBridgeHook) OnMessageReceived(msg []byte) error {
+func (h *EchoHook) OnMessageReceived(msg []byte) []byte {
 	if !h.isRunning.Load() {
-		return fmt.Errorf("hook %s is not running", h.id)
+		return msg
 	}
 
-	h.logger.Info("message received Vedant",
+	h.logger.Info("message received echo", zap.ByteString("message", msg))
+	fmt.Println("message received echo vednat", msg)
+	msg = msg[1:]
+
+	h.logger.Info("message received echo",
 		zap.ByteString("message", msg),
 		zap.String("hook_id", h.id))
-	return nil
+	return msg
 }
 
 // Provides indicates whether this hook provides the specified functionality
-func (h *NetBridgeHook) Provides(b byte) bool {
+func (h *EchoHook) Provides(b byte) bool {
 	return b == OnMessageReceived
 }
 
 // Init initializes the hook with the provided configuration
-func (h *NetBridgeHook) Init(config any) error {
+func (h *EchoHook) Init(config any) error {
 	if config != nil {
 		// You could add configuration handling here
 		// For example, if config contains log level or other settings
@@ -217,13 +219,13 @@ func (h *NetBridgeHook) Init(config any) error {
 }
 
 // Stop gracefully stops the hook
-func (h *NetBridgeHook) Stop() error {
+func (h *EchoHook) Stop() error {
 	h.isRunning.Store(false)
 	return nil
 }
 
 // ID returns the unique identifier for this hook
-func (h *NetBridgeHook) ID() string {
+func (h *EchoHook) ID() string {
 	return h.id
 }
 
