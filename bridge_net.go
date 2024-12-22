@@ -97,7 +97,6 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, logger *zap.Logger, bridgeID strin
 		mqttClient:  mqttClient,
 		logger:      logger,
 		bridgeID:    bridgeID,
-		rootTopic:   "", // will be set by opts
 		connections: make(map[string]*MQTTNetBridgeConn),
 		acceptCh:    make(chan *MQTTNetBridgeConn),
 		ctx:         ctx,
@@ -107,6 +106,7 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, logger *zap.Logger, bridgeID strin
 	for _, opt := range opts {
 		opt(bridge)
 	}
+
 
 	// Subscribe to handshake requests if we're a server
 	handshakeTopic := fmt.Sprintf("%s/bridge/handshake/%s/request/+", bridge.rootTopic, bridge.bridgeID)

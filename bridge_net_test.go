@@ -31,7 +31,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 
 	// Create bridge listener
 	serverBridgeID := "test-server"
-	rootTopic := "test-root"
+	rootTopic := "/test-base/test"
 	listener := NewMQTTNetBridge(serverClient, logger, serverBridgeID, WithRootTopic(rootTopic))
 	defer listener.Close()
 
