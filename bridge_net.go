@@ -16,6 +16,8 @@ import (
 	"google.golang.org/grpc/resolver"
 )
 
+// First, let's define the hook interface
+
 // MQTTNetBridge implements net.Listener over MQTT
 type MQTTNetBridge struct {
 	mqttClient mqtt.Client
@@ -33,6 +35,8 @@ type MQTTNetBridge struct {
 	// Shutdown management
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	hooks *BridgeHooks
 }
 
 func WithRootTopic(rootTopic string) func(*MQTTNetBridge) {
@@ -63,6 +67,8 @@ const (
 	// Message types
 	connectMsg    = "connect"
 	connectAckMsg = "connect_ack"
+
+	TraceSeparator = ":TID:"
 )
 
 type mqttResolver struct {
@@ -101,12 +107,12 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, logger *zap.Logger, bridgeID strin
 		acceptCh:    make(chan *MQTTNetBridgeConn),
 		ctx:         ctx,
 		cancel:      cancel,
+		hooks:       &BridgeHooks{logger: logger},
 	}
 
 	for _, opt := range opts {
 		opt(bridge)
 	}
-
 
 	// Subscribe to handshake requests if we're a server
 	handshakeTopic := fmt.Sprintf("%s/bridge/handshake/%s/request/+", bridge.rootTopic, bridge.bridgeID)
@@ -331,12 +337,21 @@ func (c *MQTTNetBridgeConn) SetWriteDeadline(t time.Time) error {
 
 // handleIncomingData processes incoming MQTT messages
 func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message) {
+	payload := msg.Payload()
+
+	// Execute hooks when receiving data
+	err := b.hooks.OnMessageReceived(payload)
+	if err != nil {
+		b.logger.Error("Error processing message", zap.Error(err))
+		return
+	}
+
 	b.logger.Debug("Received incoming data",
 		zap.String("topic", msg.Topic()),
-		zap.Int("bytes", len(msg.Payload())))
+		zap.Int("bytes", len(payload)))
 
 	parts := strings.Split(msg.Topic(), "/")
-	if len(parts) != 8  {
+	if len(parts) != 8 {
 		b.logger.Error("Invalid topic format", zap.String("topic", msg.Topic()))
 		return
 	}
@@ -354,10 +369,10 @@ func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message)
 	}
 
 	select {
-	case conn.readBuf <- msg.Payload():
+	case conn.readBuf <- payload:
 		b.logger.Debug("Forwarded data to connection",
 			zap.String("sessionID", sessionID),
-			zap.Int("bytes", len(msg.Payload())))
+			zap.Int("bytes", len(payload)))
 	default:
 		b.logger.Warn("Read buffer full, dropping message",
 			zap.String("session", sessionID))
@@ -383,15 +398,22 @@ func (b *MQTTNetBridge) createNewConnection(sessionID string) *MQTTNetBridgeConn
 			return
 		}
 
+		payload := msg.Payload()
+		err := b.hooks.OnMessageReceived(payload)
+		if err != nil {
+			b.logger.Error("Error processing message", zap.Error(err))
+			return
+		}
+
 		b.logger.Debug("Server received data",
 			zap.String("sessionID", sessionID),
-			zap.Int("bytes", len(msg.Payload())))
+			zap.Int("bytes", len(payload)))
 
 		select {
-		case conn.readBuf <- msg.Payload():
+		case conn.readBuf <- payload:
 			b.logger.Debug("Server forwarded data to connection",
 				zap.String("sessionID", sessionID),
-				zap.Int("bytes", len(msg.Payload())))
+				zap.Int("bytes", len(payload)))
 		default:
 			b.logger.Warn("Server read buffer full, dropping message",
 				zap.String("session", sessionID))
@@ -424,8 +446,14 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string) (net.Co
 	respChan := make(chan string, 1)
 
 	token := b.mqttClient.Subscribe(responseTopic, 0, func(_ mqtt.Client, msg mqtt.Message) {
+		payload := msg.Payload()
+		err := b.hooks.OnMessageReceived(payload)
+		if err != nil {
+			b.logger.Error("Error processing message", zap.Error(err))
+			return
+		}
 		select {
-		case respChan <- string(msg.Payload()):
+		case respChan <- string(payload):
 		default:
 			b.logger.Warn("Response channel full")
 		}
@@ -505,9 +533,18 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string) (net.Co
 
 // Add new handshake handler
 func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
+	payload := msg.Payload()
+
+	// Execute hooks when receiving data
+	err := b.hooks.OnMessageReceived(payload)
+	if err != nil {
+		b.logger.Error("Error processing message", zap.Error(err))
+		return
+	}
+
 	b.logger.Debug("Received handshake message",
 		zap.String("topic", msg.Topic()),
-		zap.String("payload", string(msg.Payload())))
+		zap.String("payload", string(payload)))
 
 	parts := strings.Split(msg.Topic(), "/")
 	if len(parts) != 8 || parts[3] != "bridge" || parts[4] != "handshake" {
@@ -517,7 +554,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 		return
 	}
 
-	msgType := string(msg.Payload())
+	msgType := string(payload)
 	clientID := parts[7]
 
 	b.logger.Debug("Parsed handshake request",
@@ -577,4 +614,19 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 			zap.String("msgType", msgType),
 			zap.String("requestType", parts[3]))
 	}
+}
+
+// AddHook adds a new hook to the bridge
+func (b *MQTTNetBridge) AddHook(hook BridgeHook, config any) error {
+	if b.hooks == nil {
+		b.hooks = &BridgeHooks{
+			logger: b.logger,
+		}
+	}
+
+	b.logger.Info("Adding hook to bridge",
+		zap.String("hook", hook.ID()),
+		zap.String("bridgeID", b.bridgeID))
+
+	return b.hooks.Add(hook, config)
 }

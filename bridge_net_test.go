@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +34,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 	serverBridgeID := "test-server"
 	rootTopic := "/test-base/test"
 	listener := NewMQTTNetBridge(serverClient, logger, serverBridgeID, WithRootTopic(rootTopic))
+	listener.AddHook(NewNetBridgeHook(logger), nil)
 	defer listener.Close()
 
 	// Channel to signal server is ready
@@ -169,3 +171,59 @@ func handleTestConnection(t *testing.T, conn io.ReadWriteCloser) {
 		t.Logf("Server echoed: %s", string(buf[:n]))
 	}
 }
+
+
+
+// NetBridgeHook implements BridgeHook interface to provide message logging functionality
+type NetBridgeHook struct {
+	logger    *zap.Logger
+	isRunning atomic.Bool
+	id        string
+}
+
+// NewNetBridgeHook creates a new LoggingHook instance
+func NewNetBridgeHook(logger *zap.Logger) *NetBridgeHook {
+	return &NetBridgeHook{
+		logger: logger,
+		id:     "net_bridge_hook",
+	}
+}
+
+// OnMessageReceived logs the received message
+func (h *NetBridgeHook) OnMessageReceived(msg []byte) error {
+	if !h.isRunning.Load() {
+		return fmt.Errorf("hook %s is not running", h.id)
+	}
+
+	h.logger.Info("message received Vedant",
+		zap.ByteString("message", msg),
+		zap.String("hook_id", h.id))
+	return nil
+}
+
+// Provides indicates whether this hook provides the specified functionality
+func (h *NetBridgeHook) Provides(b byte) bool {
+	return b == OnMessageReceived
+}
+
+// Init initializes the hook with the provided configuration
+func (h *NetBridgeHook) Init(config any) error {
+	if config != nil {
+		// You could add configuration handling here
+		// For example, if config contains log level or other settings
+	}
+	h.isRunning.Store(true)
+	return nil
+}
+
+// Stop gracefully stops the hook
+func (h *NetBridgeHook) Stop() error {
+	h.isRunning.Store(false)
+	return nil
+}
+
+// ID returns the unique identifier for this hook
+func (h *NetBridgeHook) ID() string {
+	return h.id
+}
+
