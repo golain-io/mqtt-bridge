@@ -33,7 +33,10 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 	// Create bridge listener
 	serverBridgeID := "test-server"
 	rootTopic := "/test-base/test"
-	listener := NewMQTTNetBridge(serverClient, logger, serverBridgeID, WithRootTopic(rootTopic))
+	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+	)
 	listener.AddHook(NewEchoHook(logger), nil)
 	defer listener.Close()
 
@@ -72,7 +75,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 
 	// Create client bridge
 	clientBridgeID := "test-client"
-	clientBridge := NewMQTTNetBridge(clientClient, logger, clientBridgeID, WithRootTopic(rootTopic))
+	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID, WithRootTopic(rootTopic))
 	defer clientBridge.Close()
 
 	// Connect to the server
@@ -228,4 +231,3 @@ func (h *EchoHook) Stop() error {
 func (h *EchoHook) ID() string {
 	return h.id
 }
-

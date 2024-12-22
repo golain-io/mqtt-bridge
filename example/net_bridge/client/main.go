@@ -36,7 +36,7 @@ func main() {
 	defer mqttClient.Disconnect(0)
 
 	// Create network bridge with unique client ID
-	netBridge := bridge.NewMQTTNetBridge(mqttClient, logger, "echo-client")
+	netBridge := bridge.NewMQTTNetBridge(mqttClient, "echo-client", bridge.WithLogger(logger))
 
 	/**
 	You could also use the deprecated grpc.Dial() function with the bridge client

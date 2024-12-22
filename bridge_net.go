@@ -39,12 +39,6 @@ type MQTTNetBridge struct {
 	hooks *BridgeHooks
 }
 
-func WithRootTopic(rootTopic string) func(*MQTTNetBridge) {
-	return func(b *MQTTNetBridge) {
-		b.rootTopic = rootTopic
-	}
-}
-
 // MQTTAddr implements net.Addr for MQTT connections
 type MQTTAddr struct {
 	network string
@@ -67,8 +61,6 @@ const (
 	// Message types
 	connectMsg    = "connect"
 	connectAckMsg = "connect_ack"
-
-	TraceSeparator = ":TID:"
 )
 
 type mqttResolver struct {
@@ -96,30 +88,34 @@ func (b *MQTTNetBridge) Build(target resolver.Target, cc resolver.ClientConn, op
 }
 
 // NewMQTTNetBridge creates a new bridge that listens on a specific bridgeID
-func NewMQTTNetBridge(mqttClient mqtt.Client, logger *zap.Logger, bridgeID string, opts ...func(*MQTTNetBridge)) *MQTTNetBridge {
-	logger.Info("Creating new MQTT bridge", zap.String("bridgeID", bridgeID))
+func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...func(*MQTTNetBridge)) *MQTTNetBridge {
 	ctx, cancel := context.WithCancel(context.Background())
 	bridge := &MQTTNetBridge{
 		mqttClient:  mqttClient,
-		logger:      logger,
 		bridgeID:    bridgeID,
 		connections: make(map[string]*MQTTNetBridgeConn),
 		acceptCh:    make(chan *MQTTNetBridgeConn),
 		ctx:         ctx,
 		cancel:      cancel,
-		hooks:       &BridgeHooks{logger: logger},
 	}
 
 	for _, opt := range opts {
 		opt(bridge)
 	}
 
+	// if no logger set to no-op
+	if bridge.logger == nil {
+		bridge.logger = zap.NewNop()
+	}
+
+	bridge.hooks = &BridgeHooks{logger: bridge.logger}
+
 	// Subscribe to handshake requests if we're a server
 	handshakeTopic := fmt.Sprintf("%s/bridge/handshake/%s/request/+", bridge.rootTopic, bridge.bridgeID)
-	logger.Debug("Subscribing to handshake topic", zap.String("topic", handshakeTopic))
+	bridge.logger.Debug("Subscribing to handshake topic", zap.String("topic", handshakeTopic))
 	token := mqttClient.Subscribe(handshakeTopic, 0, bridge.handleHandshake)
 	if token.Wait() && token.Error() != nil {
-		logger.Fatal("Failed to subscribe to handshake topic",
+		bridge.logger.Fatal("Failed to subscribe to handshake topic",
 			zap.String("topic", handshakeTopic),
 			zap.Error(token.Error()))
 	}
