@@ -1,3 +1,7 @@
+package bridge
+
+import "unsafe"
+
 // UnsafeString returns a string pointer without allocation
 func UnsafeString(b []byte) string {
 	// the new way is slower `return unsafe.String(unsafe.SliceData(b), len(b))`
