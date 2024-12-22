@@ -292,9 +292,7 @@ func (c *MQTTNetBridgeConn) Close() error {
 		token.Wait()
 	}
 
-	c.bridge.connMu.Lock()
 	delete(c.bridge.connections, c.sessionID)
-	c.bridge.connMu.Unlock()
 
 	close(c.readBuf)
 	return nil
