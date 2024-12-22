@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,7 +32,12 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 
 	// Create bridge listener
 	serverBridgeID := "test-server"
-	listener := NewMQTTNetBridge(serverClient, logger, serverBridgeID)
+	rootTopic := "/test-base/test"
+	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+	)
+	listener.AddHook(NewEchoHook(logger), nil)
 	defer listener.Close()
 
 	// Channel to signal server is ready
@@ -69,7 +75,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 
 	// Create client bridge
 	clientBridgeID := "test-client"
-	clientBridge := NewMQTTNetBridge(clientClient, logger, clientBridgeID)
+	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID, WithRootTopic(rootTopic))
 	defer clientBridge.Close()
 
 	// Connect to the server
@@ -167,4 +173,61 @@ func handleTestConnection(t *testing.T, conn io.ReadWriteCloser) {
 		// Log echo response
 		t.Logf("Server echoed: %s", string(buf[:n]))
 	}
+}
+
+// Hook from example/hooks/echo_hook.go
+type EchoHook struct {
+	logger    *zap.Logger
+	isRunning atomic.Bool
+	id        string
+}
+
+// NewEchoHook creates a new LoggingHook instance
+func NewEchoHook(logger *zap.Logger) *EchoHook {
+	return &EchoHook{
+		logger: logger,
+		id:     "echo_hook",
+	}
+}
+
+// OnMessageReceived logs the received message
+func (h *EchoHook) OnMessageReceived(msg []byte) []byte {
+	if !h.isRunning.Load() {
+		return msg
+	}
+
+	h.logger.Info("message received echo", zap.ByteString("message", msg))
+	fmt.Println("message received echo vednat", msg)
+	msg = msg[1:]
+
+	h.logger.Info("message received echo",
+		zap.ByteString("message", msg),
+		zap.String("hook_id", h.id))
+	return msg
+}
+
+// Provides indicates whether this hook provides the specified functionality
+func (h *EchoHook) Provides(b byte) bool {
+	return b == OnMessageReceived
+}
+
+// Init initializes the hook with the provided configuration
+func (h *EchoHook) Init(config any) error {
+	if config != nil {
+		// You could add configuration handling here
+		// For example, if config contains log level or other settings
+	}
+	h.isRunning.Store(true)
+	return nil
+}
+
+// Stop gracefully stops the hook
+func (h *EchoHook) Stop() error {
+	h.isRunning.Store(false)
+	return nil
+}
+
+// ID returns the unique identifier for this hook
+func (h *EchoHook) ID() string {
+	return h.id
 }

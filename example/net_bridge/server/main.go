@@ -32,7 +32,7 @@ func main() {
 	defer mqttClient.Disconnect(0)
 
 	// Create network bridge
-	netBridge := bridge.NewMQTTNetBridge(mqttClient, logger, "echo-service")
+	netBridge := bridge.NewMQTTNetBridge(mqttClient, "echo-service", bridge.WithLogger(logger))
 
 	// Create gRPC server with timeout options
 	grpcServer := grpc.NewServer()
