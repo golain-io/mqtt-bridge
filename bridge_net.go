@@ -508,6 +508,103 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string) (net.Co
 	}
 }
 
+// listens for connections on a unix socket and proxies them to the bridge
+func (b *MQTTNetBridge) ListenOnUnixSocket(path string, addr string) error {
+	// Remove existing socket file if it exists
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove existing socket: %v", err)
+	}
+
+	// listen for connections on the socket
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	// accept connections
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+
+		// proxy the connection to the bridge
+		bConn, err := b.Dial(b.ctx, addr)
+		if err != nil {
+			return err
+		}
+		b.proxyConn(conn, bConn)
+	}
+}
+
+func (b *MQTTNetBridge) WriteOnUnixSocket(path string, addr string) (net.Conn, error) {
+	// Remove existing socket file if it exists
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to remove existing socket: %v", err)
+	}
+
+	// Create the Unix socket
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	bConn, err := b.Accept()
+	if err != nil {
+		return nil, err
+	}
+
+	// Wait for a client to connect to our Unix socket
+	conn, err := listener.Accept()
+	if err != nil {
+		bConn.Close()
+		return nil, fmt.Errorf("failed to accept unix connection: %v", err)
+	}
+
+	go b.proxyConn(conn, bConn)
+
+	return bConn, nil
+}
+
+func (b *MQTTNetBridge) proxyConn(conn net.Conn, bConn net.Conn) {
+	go func() {
+		for {
+			if bConn == nil || conn == nil {
+				break
+			}
+			_, err := io.Copy(bConn, conn)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				b.logger.Error("Error copying data from client to bridge", zap.Error(err))
+				bConn.Close()
+				conn.Close()
+				break
+			}
+		}
+	}()
+	go func() {
+		for {
+			if bConn == nil || conn == nil {
+				break
+			}
+			_, err := io.Copy(conn, bConn)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				b.logger.Error("Error copying data from bridge to client", zap.Error(err))
+				bConn.Close()
+				conn.Close()
+				break
+			}
+		}
+	}()
+}
+
 // Add new handshake handler
 func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 	payload := msg.Payload()
