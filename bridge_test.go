@@ -38,8 +38,4 @@ func setupTestBridge(t *testing.T) (*MQTTBridge, echo.EchoServiceServer) {
 func TestEchoUnary(t *testing.T) {
 	bridge, _ := setupTestBridge(t)
 	defer bridge.mqttClient.Disconnect(0)
-
-	// Test implementation goes here
-	// You'll need to implement the client side to send messages
-	// and verify responses
 }
