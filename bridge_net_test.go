@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync/atomic"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +33,12 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 
 	// Create bridge listener
 	serverBridgeID := "test-server"
+	rootTopic := "/test-base/test"
+	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+	)
+	listener.AddHook(NewEchoHook(logger), nil)
 	rootTopic := "/test-base/test"
 	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
 		WithRootTopic(rootTopic),
@@ -75,6 +82,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 
 	// Create client bridge
 	clientBridgeID := "test-client"
+	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID, WithRootTopic(rootTopic))
 	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID, WithRootTopic(rootTopic))
 	defer clientBridge.Close()
 
