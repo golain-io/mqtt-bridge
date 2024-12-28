@@ -196,8 +196,6 @@ func (h *EchoHook) OnMessageReceived(msg []byte) []byte {
 		return msg
 	}
 
-	h.logger.Info("message received echo", zap.ByteString("message", msg))
-
 	h.logger.Info("message received echo",
 		zap.ByteString("message", msg),
 		zap.String("hook_id", h.id))
