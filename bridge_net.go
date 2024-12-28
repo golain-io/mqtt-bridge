@@ -338,12 +338,12 @@ func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message)
 		zap.Int("bytes", len(payload)))
 
 	parts := strings.Split(msg.Topic(), "/")
-	if len(parts) != 8 {
+	if len(parts) < 6 {
 		b.logger.Error("Invalid topic format", zap.String("topic", msg.Topic()))
 		return
 	}
 
-	sessionID := parts[6]
+	sessionID := parts[len(parts)-2]
 
 	b.connMu.RLock()
 	conn, exists := b.connections[sessionID]
@@ -616,7 +616,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 		zap.String("topic", msg.Topic()))
 
 	parts := strings.Split(msg.Topic(), "/")
-	if len(parts) != 8 || parts[3] != "bridge" || parts[4] != "handshake" {
+	if len(parts) < 6 {
 		b.logger.Error("Invalid handshake topic format",
 			zap.String("topic", msg.Topic()),
 			zap.Int("parts", len(parts)))
@@ -624,13 +624,13 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 	}
 
 	msgType := UnsafeString(payload)
-	clientID := parts[7]
+	clientID := parts[len(parts)-1]
 
 	b.logger.Debug("Parsed handshake request",
 		zap.String("msgType", msgType),
 		zap.String("clientID", clientID))
 
-	if parts[6] == "request" && msgType == connectMsg {
+	if parts[len(parts)-2] == "request" && msgType == connectMsg {
 		// Generate new session
 		sessionID := uuid.New().String()
 		b.logger.Debug("Creating new session",

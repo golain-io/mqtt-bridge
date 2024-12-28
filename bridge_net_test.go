@@ -32,7 +32,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 
 	// Create bridge listener
 	serverBridgeID := "test-server"
-	rootTopic := "/test-base/test"
+	rootTopic := "/vedant"
 	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
 		WithRootTopic(rootTopic),
 		WithLogger(logger),
@@ -197,8 +197,6 @@ func (h *EchoHook) OnMessageReceived(msg []byte) []byte {
 	}
 
 	h.logger.Info("message received echo", zap.ByteString("message", msg))
-	fmt.Println("message received echo vednat", msg)
-	msg = msg[1:]
 
 	h.logger.Info("message received echo",
 		zap.ByteString("message", msg),

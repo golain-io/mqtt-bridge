@@ -31,6 +31,7 @@ func (h *EchoHook) OnMessageReceived(msg []byte) []byte {
 	}
 
 	h.logger.Info("message received echo", zap.ByteString("message", msg))
+	msg = msg[1:]
 
 	h.logger.Info("message received echo",
 		zap.ByteString("message", msg),
