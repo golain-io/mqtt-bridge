@@ -114,7 +114,7 @@ func newServer(logger *zap.Logger) (*server, error) {
 		return nil, fmt.Errorf("connect to MQTT broker: %w", token.Error())
 	}
 
-	b := bridge.NewMQTTNetBridge(mqttClient, "test-server", bridge.WithLogger(logger))
+	b := bridge.NewMQTTNetBridge(mqttClient, "test-server", bridge.WithLogger(logger), bridge.WithRootTopic("/root/test"))
 
 	return &server{
 		logger:      logger,

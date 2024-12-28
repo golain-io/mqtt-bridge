@@ -24,7 +24,7 @@ func main() {
 	defer client.Disconnect(0)
 
 	// Setup bridge connection
-	b := bridge.NewMQTTNetBridge(client, "test-client")
+	b := bridge.NewMQTTNetBridge(client, "test-client", bridge.WithRootTopic("/root/test"))
 	defer b.Close()
 
 	conn, err := b.Dial(context.Background(), "test-server")
