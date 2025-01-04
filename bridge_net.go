@@ -24,6 +24,7 @@ type MQTTNetBridge struct {
 	logger     *zap.Logger
 	bridgeID   string // Our "listening address"
 	rootTopic  string
+	qos        byte
 
 	// Connection management
 	connections map[string]*MQTTNetBridgeConn
@@ -97,6 +98,7 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...func(*MQT
 		acceptCh:    make(chan *MQTTNetBridgeConn),
 		ctx:         ctx,
 		cancel:      cancel,
+		qos:         1, // Set default QoS to 1
 	}
 
 	for _, opt := range opts {
@@ -113,7 +115,7 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...func(*MQT
 	// Subscribe to handshake requests if we're a server
 	handshakeTopic := fmt.Sprintf("%s/bridge/handshake/%s/request/+", bridge.rootTopic, bridge.bridgeID)
 	bridge.logger.Debug("Subscribing to handshake topic", zap.String("topic", handshakeTopic))
-	token := mqttClient.Subscribe(handshakeTopic, 0, bridge.handleHandshake)
+	token := mqttClient.Subscribe(handshakeTopic, bridge.qos, bridge.handleHandshake)
 	if token.Wait() && token.Error() != nil {
 		bridge.logger.Fatal("Failed to subscribe to handshake topic",
 			zap.String("topic", handshakeTopic),
@@ -254,7 +256,7 @@ func (c *MQTTNetBridgeConn) Write(b []byte) (n int, err error) {
 		topic = c.downTopic // Server writes to down topic
 	}
 
-	token := c.bridge.mqttClient.Publish(topic, 0, false, b)
+	token := c.bridge.mqttClient.Publish(topic, c.bridge.qos, false, b)
 	c.bridge.logger.Debug("Writing data",
 		zap.String("sessionID", c.sessionID),
 		zap.Int("bytes", len(b)),
@@ -380,7 +382,7 @@ func (b *MQTTNetBridge) createNewConnection(sessionID string) *MQTTNetBridgeConn
 	}
 
 	// Subscribe to session up topic for server with QoS 1 to ensure delivery
-	token := b.mqttClient.Subscribe(conn.upTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+	token := b.mqttClient.Subscribe(conn.upTopic, b.qos, func(client mqtt.Client, msg mqtt.Message) {
 		if conn.closed {
 			return
 		}
@@ -427,7 +429,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string) (net.Co
 	responseTopic := fmt.Sprintf(handshakeResponseTopic, b.rootTopic, targetBridgeID, clientID)
 	respChan := make(chan string, 1)
 
-	token := b.mqttClient.Subscribe(responseTopic, 0, func(_ mqtt.Client, msg mqtt.Message) {
+	token := b.mqttClient.Subscribe(responseTopic, b.qos, func(_ mqtt.Client, msg mqtt.Message) {
 		payload := b.hooks.OnMessageReceived(msg.Payload())
 		select {
 		case respChan <- UnsafeString(payload):
@@ -442,7 +444,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string) (net.Co
 
 	// Send connect request
 	requestTopic := fmt.Sprintf(handshakeRequestTopic, b.rootTopic, targetBridgeID, clientID)
-	token = b.mqttClient.Publish(requestTopic, 0, false, []byte(connectMsg))
+	token = b.mqttClient.Publish(requestTopic, b.qos, false, []byte(connectMsg))
 	if token.Wait() && token.Error() != nil {
 		return nil, fmt.Errorf("handshake request failed: %v", token.Error())
 	}
@@ -487,7 +489,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string) (net.Co
 		b.connMu.Unlock()
 
 		// Subscribe to session messages
-		token = b.mqttClient.Subscribe(conn.downTopic, 1, b.handleIncomingData)
+		token = b.mqttClient.Subscribe(conn.downTopic, b.qos, b.handleIncomingData)
 		if token.Wait() && token.Error() != nil {
 			conn.Close()
 			return nil, fmt.Errorf("session subscribe failed: %v", token.Error())
@@ -653,7 +655,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 			zap.String("topic", responseTopic),
 			zap.String("response", response))
 
-		token := b.mqttClient.Publish(responseTopic, 0, false, []byte(response))
+		token := b.mqttClient.Publish(responseTopic, b.qos, false, []byte(response))
 		if token.Wait() && token.Error() != nil {
 			b.logger.Error("Failed to send connect_ack",
 				zap.String("clientID", clientID),

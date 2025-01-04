@@ -36,6 +36,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
 		WithRootTopic(rootTopic),
 		WithLogger(logger),
+		WithQoS(2),
 	)
 	listener.AddHook(NewEchoHook(logger), nil)
 	defer listener.Close()
