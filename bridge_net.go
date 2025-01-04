@@ -382,7 +382,7 @@ func (b *MQTTNetBridge) createNewConnection(sessionID string) *MQTTNetBridgeConn
 	}
 
 	// Subscribe to session up topic for server with QoS 1 to ensure delivery
-	token := b.mqttClient.Subscribe(conn.upTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+	token := b.mqttClient.Subscribe(conn.upTopic, b.qos, func(client mqtt.Client, msg mqtt.Message) {
 		if conn.closed {
 			return
 		}
