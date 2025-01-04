@@ -24,3 +24,9 @@ func WithRootTopic(rootTopic string) func(*MQTTNetBridge) {
 		b.rootTopic = rootTopic
 	}
 }
+
+func WithQoS(qos byte) func(*MQTTNetBridge) {
+	return func(b *MQTTNetBridge) {
+		b.qos = qos
+	}
+}
