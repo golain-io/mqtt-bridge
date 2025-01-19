@@ -256,6 +256,10 @@ type MQTTNetBridgeConn struct {
 	}
 }
 
+func (c *MQTTNetBridgeConn) SessionID() string {
+	return c.sessionID
+}
+
 func (c *MQTTNetBridgeConn) handleLifecycleHandshake() {
 	for { // Wait for connect_ack
 		select {
