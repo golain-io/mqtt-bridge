@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -155,6 +156,15 @@ func handleTestConnection(t *testing.T, conn io.ReadWriteCloser) {
 				t.Logf("Read error: %v", err)
 			}
 			return
+		}
+
+		// Don't echo control messages
+		msgStr := string(buf[:n])
+		if strings.HasPrefix(msgStr, disconnectMsg+":") ||
+			strings.HasPrefix(msgStr, suspendMsg+":") ||
+			strings.HasPrefix(msgStr, resumeMsg+":") {
+			t.Logf("Server received control message: %s", msgStr)
+			continue
 		}
 
 		// Log received data
@@ -608,6 +618,166 @@ func TestMQTTBridgeSessionExchange(t *testing.T) {
 		_, err = conn1.Write([]byte("test"))
 		if err == nil {
 			t.Fatal("Expected original connection to be closed")
+		}
+
+		// Clean up
+		conn2.Close()
+	})
+}
+
+func TestMQTTBridgeDisconnectCleanup(t *testing.T) {
+	// Setup logger
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+
+	// MQTT client options for server
+	serverOpts := mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-server")
+
+	// Create and connect server MQTT client
+	serverClient := mqtt.NewClient(serverOpts)
+	if token := serverClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect server to MQTT: %v", token.Error())
+	}
+	defer serverClient.Disconnect(250)
+
+	// Create bridge listener
+	serverBridgeID := "test-server"
+	rootTopic := "/test-disconnect"
+	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+		WithQoS(1),
+	)
+	defer listener.Close()
+
+	// Start server goroutine
+	serverErr := make(chan error, 1)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				serverErr <- fmt.Errorf("accept error: %v", err)
+				return
+			}
+			go handleTestConnection(t, conn)
+		}
+	}()
+
+	// Create client MQTT client
+	clientOpts := mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-client")
+
+	clientClient := mqtt.NewClient(clientOpts)
+	if token := clientClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect client to MQTT: %v", token.Error())
+	}
+	defer clientClient.Disconnect(250)
+
+	// Create client bridge
+	clientBridge := NewMQTTNetBridge(clientClient, "test-client",
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+		WithQoS(1),
+	)
+	defer clientBridge.Close()
+
+	t.Run("Disconnect Cleanup", func(t *testing.T) {
+		// 1. Establish initial connection
+		conn1, err := clientBridge.Dial(context.Background(), serverBridgeID)
+		if err != nil {
+			t.Fatalf("Failed to establish initial connection: %v", err)
+		}
+		sessionID := conn1.(*MQTTNetBridgeConn).sessionID
+
+		// 2. Verify connection works
+		testData := []byte("test data")
+		_, err = conn1.Write(testData)
+		if err != nil {
+			t.Fatalf("Failed to write data: %v", err)
+		}
+
+		buf := make([]byte, 1024)
+		deadline := time.Now().Add(5 * time.Second)
+		conn1.SetReadDeadline(deadline)
+		n, err := conn1.Read(buf)
+		if err != nil {
+			t.Fatalf("Failed to read echo response: %v", err)
+		}
+		if string(buf[:n]) != string(testData) {
+			t.Fatalf("Echo mismatch. Got %s, want %s", string(buf[:n]), string(testData))
+		}
+
+		// 3. Close client connection abruptly (simulating disconnect)
+		conn1.Close()
+
+		// 4. Verify session is suspended after disconnect
+		time.Sleep(100 * time.Millisecond) // Small delay to allow disconnect message processing
+		listener.sessionsMu.RLock()
+		session, exists := listener.sessions[sessionID]
+		listener.sessionsMu.RUnlock()
+
+		if !exists {
+			t.Fatal("Session should still exist after disconnect")
+		}
+		if session.State != BridgeSessionStateSuspended {
+			t.Fatalf("Session should be suspended, got state: %v", session.State)
+		}
+
+		// 5. Wait for cleanup delay and verify session is cleaned up
+		time.Sleep(2 * time.Second)
+
+		listener.sessionsMu.RLock()
+		_, exists = listener.sessions[sessionID]
+		listener.sessionsMu.RUnlock()
+
+		if exists {
+			t.Fatal("Session should have been cleaned up after delay")
+		}
+
+		// 6. Verify we cannot resume the cleaned up session
+		_, err = clientBridge.ResumeSession(context.Background(), serverBridgeID, sessionID)
+		if err == nil {
+			t.Fatal("Expected error when resuming cleaned up session")
+		}
+	})
+
+	t.Run("Disconnect Then Quick Resume", func(t *testing.T) {
+		// 1. Establish initial connection
+		conn1, err := clientBridge.Dial(context.Background(), serverBridgeID)
+		if err != nil {
+			t.Fatalf("Failed to establish initial connection: %v", err)
+		}
+		sessionID := conn1.(*MQTTNetBridgeConn).sessionID
+
+		// 2. Close client connection abruptly
+		conn1.Close()
+
+		// 3. Quick resume before timeout
+		time.Sleep(500 * time.Millisecond) // Increased delay for disconnect processing
+		conn2, err := clientBridge.ResumeSession(context.Background(), serverBridgeID, sessionID)
+		if err != nil {
+			t.Fatalf("Failed to resume session before timeout: %v", err)
+		}
+
+		// 4. Verify resumed connection works
+		testData := []byte("test after resume")
+		_, err = conn2.Write(testData)
+		if err != nil {
+			t.Fatalf("Failed to write data after resume: %v", err)
+		}
+
+		buf := make([]byte, 1024)
+		deadline := time.Now().Add(5 * time.Second)
+		conn2.SetReadDeadline(deadline)
+		n, err := conn2.Read(buf)
+		if err != nil {
+			t.Fatalf("Failed to read echo response after resume: %v", err)
+		}
+		if string(buf[:n]) != string(testData) {
+			t.Fatalf("Echo mismatch after resume. Got %s, want %s", string(buf[:n]), string(testData))
 		}
 
 		// Clean up
