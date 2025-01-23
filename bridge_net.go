@@ -170,6 +170,28 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...BridgeOpt
 		return nil
 	}
 
+	// Load sessions from SQLite if hook is present
+	if bridge.hooks != nil && bridge.hooks.Provides(OnMessageReceived) {
+		for _, hook := range bridge.hooks.GetAll() {
+			if sqliteHook, ok := hook.(*SQLiteHook); ok {
+				sessions, err := sqliteHook.LoadAllSessions()
+				if err != nil {
+					bridge.logger.Error("Failed to load sessions from SQLite",
+						zap.Error(err))
+				} else {
+					bridge.sessionsMu.Lock()
+					for id, session := range sessions {
+						bridge.sessions[id] = session
+					}
+					bridge.sessionsMu.Unlock()
+					bridge.logger.Info("Loaded sessions from SQLite",
+						zap.Int("count", len(sessions)))
+				}
+				break
+			}
+		}
+	}
+
 	bridge.startCleanupTask(5*time.Minute, defaultSessionTimeout)
 
 	return bridge
@@ -840,6 +862,20 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 		session.State = BridgeSessionStateSuspended
 		session.LastSuspended = time.Now()
 
+		// Update session in SQLite if hook is present
+		if b.hooks != nil {
+			for _, hook := range b.hooks.GetAll() {
+				if sqliteHook, ok := hook.(*SQLiteHook); ok {
+					if err := sqliteHook.SaveSession(session); err != nil {
+						b.logger.Error("Failed to update suspended session in SQLite",
+							zap.String("sessionID", session.ID),
+							zap.Error(err))
+					}
+					break
+				}
+			}
+		}
+
 		session.Connection.Close()
 
 		return nil
@@ -1139,6 +1175,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 	}
 }
 
+// handleNewConnection handles a new connection and saves session info to SQLite if hook is present
 func (b *MQTTNetBridge) handleNewConnection(conn *MQTTNetBridgeConn, clientID, responseTopic string) {
 	// Send connection acknowledgment with session details
 	response := fmt.Sprintf("%s:%s:%s:%s", connectAckMsg, conn.sessionID, conn.upTopic, conn.downTopic)
@@ -1168,6 +1205,20 @@ func (b *MQTTNetBridge) handleNewConnection(conn *MQTTNetBridgeConn, clientID, r
 	}
 	b.sessions[conn.sessionID] = session
 	b.sessionsMu.Unlock()
+
+	// Save session to SQLite if hook is present
+	if b.hooks != nil {
+		for _, hook := range b.hooks.GetAll() {
+			if sqliteHook, ok := hook.(*SQLiteHook); ok {
+				if err := sqliteHook.SaveSession(session); err != nil {
+					b.logger.Error("Failed to save session to SQLite",
+						zap.String("sessionID", session.ID),
+						zap.Error(err))
+				}
+				break
+			}
+		}
+	}
 
 	// Queue for Accept after successful ack
 	select {
@@ -1223,6 +1274,33 @@ func (b *MQTTNetBridge) CleanupStaleSessions(timeout time.Duration) {
 				zap.String("sessionID", id),
 				zap.String("state", session.State.String()),
 				zap.Duration("age", now.Sub(session.LastSuspended)))
+
+			// Delete from SQLite if hook is present
+			if b.hooks != nil {
+				for _, hook := range b.hooks.GetAll() {
+					if sqliteHook, ok := hook.(*SQLiteHook); ok {
+						if err := sqliteHook.DeleteSession(id); err != nil {
+							b.logger.Error("Failed to delete session from SQLite",
+								zap.String("sessionID", id),
+								zap.Error(err))
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Also cleanup stale sessions in SQLite
+	if b.hooks != nil {
+		for _, hook := range b.hooks.GetAll() {
+			if sqliteHook, ok := hook.(*SQLiteHook); ok {
+				if err := sqliteHook.CleanupStaleSessions(timeout); err != nil {
+					b.logger.Error("Failed to cleanup stale sessions in SQLite",
+						zap.Error(err))
+				}
+				break
+			}
 		}
 	}
 }
