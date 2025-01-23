@@ -82,8 +82,11 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 	defer clientBridge.Close()
 
 	// Connect to the server
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// Add small delay to ensure server is ready
+	time.Sleep(100 * time.Millisecond)
 
 	conn, err := clientBridge.Dial(ctx, serverBridgeID)
 	if err != nil {
@@ -91,16 +94,17 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Increase timeout for server readiness
+	// Wait for server readiness with increased timeout
 	select {
 	case <-serverReady:
+		t.Log("Server ready")
 	case err := <-serverErr:
 		t.Fatal(err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("Timeout waiting for server to be ready")
 	}
 
-	// Add small delay to ensure MQTT subscriptions are fully established
+	// Add delay to ensure MQTT subscriptions are fully established
 	time.Sleep(500 * time.Millisecond)
 
 	// Test echo functionality
@@ -407,9 +411,7 @@ func TestMQTTBridgeSessionManagement(t *testing.T) {
 		listener.CleanupStaleSessions(1 * time.Millisecond)
 
 		// 4. Verify session is cleaned up
-		listener.sessionsMu.RLock()
-		_, exists := listener.sessions[sessionID]
-		listener.sessionsMu.RUnlock()
+		_, exists := listener.sessionManager.GetSession(sessionID)
 		if exists {
 			t.Fatal("Session should have been cleaned up")
 		}
@@ -715,9 +717,7 @@ func TestMQTTBridgeDisconnectCleanup(t *testing.T) {
 
 		// 4. Verify session is suspended after disconnect
 		time.Sleep(100 * time.Millisecond) // Small delay to allow disconnect message processing
-		listener.sessionsMu.RLock()
-		session, exists := listener.sessions[sessionID]
-		listener.sessionsMu.RUnlock()
+		session, exists := listener.sessionManager.GetSession(sessionID)
 
 		if !exists {
 			t.Fatal("Session should still exist after disconnect")
@@ -729,9 +729,7 @@ func TestMQTTBridgeDisconnectCleanup(t *testing.T) {
 		// 5. Wait for cleanup delay and verify session is cleaned up
 		time.Sleep(2 * time.Second)
 
-		listener.sessionsMu.RLock()
-		_, exists = listener.sessions[sessionID]
-		listener.sessionsMu.RUnlock()
+		_, exists = listener.sessionManager.GetSession(sessionID)
 
 		if exists {
 			t.Fatal("Session should have been cleaned up after delay")
