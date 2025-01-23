@@ -782,14 +782,42 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 			go conn.handleLifecycleHandshake()
 
 			return conn, nil
+
+		case errorMsg:
+			if len(msgParts) < 2 {
+				return nil, NewBridgeError("dial", "invalid error message format", nil)
+			}
+			errorType := msgParts[1]
+			var err error
+			switch errorType {
+			case errSessionActive:
+				err = NewSessionActiveError(sessionID)
+			case errSessionNotFound:
+				err = NewSessionNotFoundError(sessionID)
+			case errInvalidSession:
+				err = NewInvalidSessionError(sessionID)
+			case errSessionSuspended:
+				err = NewSessionSuspendedError(sessionID)
+			case "unauthorized":
+				err = NewUnauthorizedError(sessionID)
+			case "failed_to_create_connection":
+				err = NewConnectionFailedError(sessionID, nil)
+			default:
+				err = NewBridgeError("dial", fmt.Sprintf("server error: %s", errorType), nil)
+			}
+			b.logger.Error("Received error from server",
+				zap.String("errorType", errorType),
+				zap.Error(err))
+			return nil, err
+
 		default:
-			return nil, fmt.Errorf("unexpected message type: %s", msgType)
+			return nil, NewBridgeError("dial", fmt.Sprintf("unexpected message type: %s", msgType), nil)
 		}
 
 	case <-time.After(5 * time.Second):
-		return nil, fmt.Errorf("handshake timeout")
+		return nil, NewBridgeError("dial", "handshake timeout", nil)
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, NewBridgeError("dial", "context cancelled", ctx.Err())
 	}
 }
 
@@ -800,12 +828,12 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 	session, exists := b.sessions[sessionID]
 	if !exists {
 		b.sessionsMu.RUnlock()
-		return fmt.Errorf("session %s not found", sessionID)
+		return NewSessionNotFoundError(sessionID)
 	}
 
 	if session.State != BridgeSessionStateActive {
 		b.sessionsMu.RUnlock()
-		return fmt.Errorf("session %s is not active", sessionID)
+		return NewBridgeError("suspend", fmt.Sprintf("session %s is not active", sessionID), nil)
 	}
 
 	clientID := session.ClientID
@@ -827,7 +855,7 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 	msg := fmt.Sprintf("%s:%s", suspendMsg, sessionID)
 	token := b.mqttClient.Publish(requestTopic, b.qos, false, []byte(msg))
 	if token.Wait() && token.Error() != nil {
-		return fmt.Errorf("suspend request failed: %v", token.Error())
+		return NewBridgeError("suspend", "suspend request failed", token.Error())
 	}
 
 	// Wait for suspend_ack
@@ -845,7 +873,7 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 		return nil
 
 	case <-time.After(5 * time.Second):
-		return fmt.Errorf("suspend timeout")
+		return NewBridgeError("suspend", "suspend timeout", nil)
 	}
 }
 
@@ -1255,12 +1283,12 @@ func (b *MQTTNetBridge) DisconnectSession(sessionID string) error {
 	session, exists := b.sessions[sessionID]
 	if !exists {
 		b.sessionsMu.RUnlock()
-		return fmt.Errorf("session %s not found", sessionID)
+		return NewSessionNotFoundError(sessionID)
 	}
 
 	if session.State != BridgeSessionStateActive {
 		b.sessionsMu.RUnlock()
-		return fmt.Errorf("session %s is not active", sessionID)
+		return NewBridgeError("disconnect", fmt.Sprintf("session %s is not active", sessionID), nil)
 	}
 
 	// Get the info we need and release the read lock
@@ -1279,7 +1307,7 @@ func (b *MQTTNetBridge) DisconnectSession(sessionID string) error {
 	msg := fmt.Sprintf("%s:%s", disconnectMsg, sessionID)
 	token := b.mqttClient.Publish(requestTopic, b.qos, false, []byte(msg))
 	if token.Wait() && token.Error() != nil {
-		return fmt.Errorf("disconnect request failed: %v", token.Error())
+		return NewBridgeError("disconnect", "disconnect request failed", token.Error())
 	}
 
 	// Clean up the session
