@@ -19,12 +19,21 @@ type SessionInfo struct {
 	LastSuspended time.Time
 	Connection    *MQTTNetBridgeConn
 	Metadata      map[string]string
+	Timeout       time.Duration
+}
+
+// SessionStore defines the interface for session storage providers
+type SessionStore interface {
+	GetStoredSessions() (map[string]*SessionInfo, error)
 }
 
 // SessionManager handles session lifecycle and state management
 type SessionManager struct {
 	bridge *MQTTNetBridge
 	logger *zap.Logger
+
+	// Session storage
+	store SessionStore
 
 	// Session management
 	sessions   map[string]*SessionInfo
@@ -48,6 +57,8 @@ type SessionManager struct {
 // NewSessionManager creates a new session manager
 func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger) *SessionManager {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Initialize with default values
 	sm := &SessionManager{
 		bridge:                  bridge,
 		logger:                  logger,
@@ -59,10 +70,74 @@ func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger) *SessionManage
 		cancel:                  cancel,
 	}
 
+	// Check if any hook implements SessionStore
+	if bridge.hooks != nil {
+		for _, hook := range bridge.hooks.Hooks {
+			if store, ok := hook.(SessionStore); ok {
+				sm.store = store
+				sm.logger.Debug("Found hook implementing SessionStore",
+					zap.String("hookID", hook.ID()))
+				// Load sessions from storage
+				if err := sm.loadSessions(); err != nil {
+					logger.Error("Failed to load sessions from storage",
+						zap.Error(err))
+				}
+				break
+			}
+		}
+	}
+
+	if sm.store == nil {
+		logger.Debug("No hook implementing SessionStore found, starting with empty session state")
+	}
+
 	// Start cleanup task
-	sm.startCleanupTask(5*time.Minute, defaultSessionTimeout)
+	sm.startCleanupTask(1*time.Second, defaultSessionTimeout)
 
 	return sm
+}
+
+// loadSessions loads all sessions from the storage
+func (sm *SessionManager) loadSessions() error {
+	if sm.store == nil {
+		return nil
+	}
+
+	sessions, err := sm.store.GetStoredSessions()
+	if err != nil {
+		return fmt.Errorf("failed to get stored sessions: %w", err)
+	}
+
+	sm.sessionsMu.Lock()
+	defer sm.sessionsMu.Unlock()
+
+	for id, session := range sessions {
+		// Create a new connection for active sessions
+		if session.State == BridgeSessionStateActive {
+			conn := &MQTTNetBridgeConn{
+				ctx:        sm.ctx,
+				cancel:     func() {}, // Will be set by the bridge when needed
+				bridge:     sm.bridge,
+				sessionID:  session.ID,
+				readBuf:    make(chan []byte, 100),
+				localAddr:  sm.bridge.Addr(),
+				remoteAddr: &MQTTAddr{network: "mqtt", address: session.ClientID},
+				upTopic:    fmt.Sprintf(sessionUpTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, session.ID),
+				downTopic:  fmt.Sprintf(sessionDownTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, session.ID),
+				role:       "server",
+				connMu:     sync.RWMutex{},
+			}
+			session.Connection = conn
+		}
+
+		sm.sessions[id] = session
+		sm.logger.Info("Loaded session from storage",
+			zap.String("sessionID", id),
+			zap.String("state", session.State.String()),
+			zap.String("clientID", session.ClientID))
+	}
+
+	return nil
 }
 
 // GetSession retrieves a session by ID
@@ -88,7 +163,7 @@ func (sm *SessionManager) RemoveSession(sessionID string) {
 }
 
 // CreateSession creates a new session
-func (sm *SessionManager) CreateSession(sessionID, clientID string) *SessionInfo {
+func (sm *SessionManager) CreateSession(sessionID, clientID string, timeout time.Duration) *SessionInfo {
 	sm.sessionsMu.Lock()
 	defer sm.sessionsMu.Unlock()
 
@@ -114,6 +189,7 @@ func (sm *SessionManager) CreateSession(sessionID, clientID string) *SessionInfo
 		LastActive: time.Now(),
 		Connection: conn,
 		Metadata:   make(map[string]string),
+		Timeout:    timeout,
 	}
 
 	sm.sessions[sessionID] = session
@@ -121,7 +197,7 @@ func (sm *SessionManager) CreateSession(sessionID, clientID string) *SessionInfo
 }
 
 // SuspendSession suspends an active session
-func (sm *SessionManager) SuspendSession(sessionID string) error {
+func (sm *SessionManager) SuspendSession(sessionID, clientID string) error {
 	sm.sessionsMu.Lock()
 	session, exists := sm.sessions[sessionID]
 	if !exists {
@@ -129,55 +205,36 @@ func (sm *SessionManager) SuspendSession(sessionID string) error {
 		return NewSessionNotFoundError(sessionID)
 	}
 
+	// Verify the client owns this session
+	if session.ClientID != clientID {
+		sm.sessionsMu.Unlock()
+		return NewUnauthorizedError(sessionID)
+	}
+
 	if session.State != BridgeSessionStateActive {
 		sm.sessionsMu.Unlock()
 		return NewBridgeError("suspend", fmt.Sprintf("session %s is not active", sessionID), nil)
 	}
 
-	clientID := session.ClientID
-	remoteAddr := session.Connection.remoteAddr.String()
+	session.State = BridgeSessionStateSuspended
+	session.LastSuspended = time.Now()
 	sm.sessionsMu.Unlock()
 
-	// Create suspend channel
-	suspendChan := make(chan struct{})
-	sm.sessionSuspendedChanMapMu.Lock()
-	sm.sessionSuspendedChanMap[sessionID] = suspendChan
-	sm.sessionSuspendedChanMapMu.Unlock()
-
-	// Send suspend request
-	requestTopic := fmt.Sprintf(handshakeRequestTopic, sm.bridge.rootTopic, remoteAddr, clientID)
-	msg := fmt.Sprintf("%s:%s", suspendMsg, sessionID)
-	token := sm.bridge.mqttClient.Publish(requestTopic, sm.bridge.qos, false, []byte(msg))
-	if token.Wait() && token.Error() != nil {
-		sm.sessionSuspendedChanMapMu.Lock()
-		delete(sm.sessionSuspendedChanMap, sessionID)
-		sm.sessionSuspendedChanMapMu.Unlock()
-		return NewBridgeError("suspend", "suspend request failed", token.Error())
-	}
-
-	// Wait for acknowledgment
-	select {
-	case <-suspendChan:
-		sm.sessionSuspendedChanMapMu.Lock()
-		delete(sm.sessionSuspendedChanMap, sessionID)
-		sm.sessionSuspendedChanMapMu.Unlock()
-
-		sm.sessionsMu.Lock()
-		session.State = BridgeSessionStateSuspended
-		session.LastSuspended = time.Now()
-		sm.sessionsMu.Unlock()
-
-		if session.Connection != nil {
-			session.Connection.Close()
+	// Call hook for suspended session
+	if sm.bridge.hooks != nil {
+		if err := sm.bridge.hooks.OnSessionSuspended(session); err != nil {
+			sm.logger.Error("Failed to execute OnSessionSuspended hooks",
+				zap.Error(err))
 		}
-		return nil
-
-	case <-time.After(5 * time.Second):
-		sm.sessionSuspendedChanMapMu.Lock()
-		delete(sm.sessionSuspendedChanMap, sessionID)
-		sm.sessionSuspendedChanMapMu.Unlock()
-		return NewBridgeError("suspend", "suspend timeout", nil)
 	}
+
+	if session.Connection != nil {
+		session.Connection.closed = true
+		close(session.Connection.readBuf)
+		session.Connection = nil
+	}
+
+	return nil
 }
 
 // ResumeSession attempts to resume a suspended session
@@ -210,48 +267,42 @@ func (sm *SessionManager) DisconnectSession(sessionID string) error {
 		return NewSessionNotFoundError(sessionID)
 	}
 
-	if session.State != BridgeSessionStateActive {
-		sm.sessionsMu.Unlock()
-		return NewBridgeError("disconnect", fmt.Sprintf("session %s is not active", sessionID), nil)
-	}
-
 	clientID := session.ClientID
 	remoteAddr := session.Connection.remoteAddr.String()
 	conn := session.Connection
+	session.State = BridgeSessionStateClosed
 	sm.sessionsMu.Unlock()
 
-	// Send disconnect request
-	requestTopic := fmt.Sprintf(handshakeRequestTopic, sm.bridge.rootTopic, remoteAddr, clientID)
-	msg := fmt.Sprintf("%s:%s", disconnectMsg, sessionID)
-	token := sm.bridge.mqttClient.Publish(requestTopic, sm.bridge.qos, false, []byte(msg))
-	if token.Wait() && token.Error() != nil {
-		return NewBridgeError("disconnect", "disconnect request failed", token.Error())
+	// Call hook for disconnected session
+	if sm.bridge.hooks != nil {
+		if err := sm.bridge.hooks.OnSessionDisconnected(session); err != nil {
+			sm.logger.Error("Failed to execute OnSessionDisconnected hooks",
+				zap.Error(err))
+		}
 	}
 
 	// Clean up session
 	sm.sessionsMu.Lock()
-	session.State = BridgeSessionStateClosed
 	delete(sm.sessions, sessionID)
 	sm.sessionsMu.Unlock()
 
+	sm.logger.Info("Disconnected session",
+		zap.String("sessionID", sessionID),
+		zap.String("clientID", clientID),
+		zap.String("targetBridgeID", remoteAddr))
+
 	// Close connection
 	if conn != nil {
-		conn.connMu.Lock()
-		conn.closed = true
-		if conn.readBuf != nil {
-			close(conn.readBuf)
-			conn.readBuf = nil
-		}
-		conn.connMu.Unlock()
+		conn.Close()
 	}
 
 	return nil
 }
 
 // CleanupStaleSessions removes sessions that have been suspended longer than the timeout
-func (sm *SessionManager) CleanupStaleSessions(timeout time.Duration) {
-	if timeout == 0 {
-		timeout = defaultSessionTimeout
+func (sm *SessionManager) CleanupStaleSessions(defaultTimeout time.Duration) {
+	if defaultTimeout == 0 {
+		defaultTimeout = defaultSessionTimeout
 	}
 
 	sm.sessionsMu.Lock()
@@ -259,12 +310,19 @@ func (sm *SessionManager) CleanupStaleSessions(timeout time.Duration) {
 
 	now := time.Now()
 	for id, session := range sm.sessions {
-		if (session.State == BridgeSessionStateSuspended && now.Sub(session.LastSuspended) > timeout) ||
+		// Use session-specific timeout if set, otherwise use default
+		timeout := defaultTimeout
+		if session.Timeout > 0 {
+			timeout = session.Timeout
+		}
+
+		if now.Sub(session.LastSuspended) > timeout ||
 			session.State == BridgeSessionStateClosed {
 			delete(sm.sessions, id)
 			sm.logger.Debug("Cleaned up stale session",
 				zap.String("sessionID", id),
 				zap.String("state", session.State.String()),
+				zap.Duration("sessionTimeout", timeout),
 				zap.Duration("age", now.Sub(session.LastSuspended)))
 		}
 	}
@@ -312,7 +370,7 @@ func (sm *SessionManager) GetAllSessions() map[string]*SessionInfo {
 // HandleSessionError processes session error messages
 func (sm *SessionManager) HandleSessionError(sessionID string, errorType string) error {
 	sm.sessionsMu.RLock()
-	session, exists := sm.sessions[sessionID]
+	_, exists := sm.sessions[sessionID]
 	sm.sessionsMu.RUnlock()
 
 	if !exists {
@@ -329,29 +387,20 @@ func (sm *SessionManager) HandleSessionError(sessionID string, errorType string)
 		err = NewInvalidSessionError(sessionID)
 	case errSessionSuspended:
 		err = NewSessionSuspendedError(sessionID)
-	case "unauthorized":
-		err = NewUnauthorizedError(sessionID)
-	case "failed_to_create_connection":
-		err = NewConnectionFailedError(sessionID, nil)
 	default:
 		err = NewBridgeError("session", fmt.Sprintf("server error: %s", errorType), nil)
 	}
 
-	sm.logger.Error("Session error",
+	sm.logger.Warn("Session error",
 		zap.String("sessionID", sessionID),
 		zap.String("errorType", errorType),
 		zap.Error(err))
-
-	// Close connection if exists
-	if session.Connection != nil {
-		session.Connection.Close()
-	}
 
 	return err
 }
 
 // HandleDisconnect processes a disconnect message for a session
-func (sm *SessionManager) HandleDisconnect(sessionID string) {
+func (sm *SessionManager) HandleDisconnect(clientID, sessionID string) error {
 	sm.logger.Debug("Handling session disconnect",
 		zap.String("sessionID", sessionID))
 
@@ -359,12 +408,29 @@ func (sm *SessionManager) HandleDisconnect(sessionID string) {
 	if !exists {
 		sm.logger.Debug("No session found for disconnect",
 			zap.String("sessionID", sessionID))
-		return
+		return NewSessionNotFoundError(sessionID)
 	}
 
 	sm.logger.Debug("Found session for disconnect",
 		zap.String("sessionID", sessionID),
 		zap.String("currentState", session.State.String()))
+
+	// Verify the client owns this session
+	if session.ClientID != clientID {
+		sm.logger.Warn("Unauthorized disconnect attempt",
+			zap.String("sessionID", sessionID),
+			zap.String("sessionClientID", session.ClientID),
+			zap.String("requestingClientID", clientID))
+		return NewUnauthorizedError(sessionID)
+	}
+
+	if session.State != BridgeSessionStateActive {
+		return NewSessionActiveError(sessionID)
+	}
+
+	sm.logger.Info("Disconnecting session",
+		zap.String("sessionID", sessionID),
+		zap.String("clientID", clientID))
 
 	// Mark as suspended and update timestamp
 	session.State = BridgeSessionStateSuspended
@@ -380,8 +446,7 @@ func (sm *SessionManager) HandleDisconnect(sessionID string) {
 	sm.logger.Debug("Marked session as suspended",
 		zap.String("sessionID", sessionID))
 
-	// Start cleanup timer
-	go sm.startSessionCleanupTimer(sessionID)
+	return nil
 }
 
 // startSessionCleanupTimer starts a timer to clean up a suspended session
@@ -411,6 +476,9 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 	msgParts := strings.Split(UnsafeString(payload), ":")
 	msgType := msgParts[0]
 
+	sm.logger.Info("Received lifecycle msg",
+		zap.String("type", msgType))
+
 	switch msgType {
 	case suspendAckMsg:
 		if len(msgParts) < 2 {
@@ -420,6 +488,9 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 			return
 		}
 		sessionID := msgParts[1]
+
+		sm.logger.Debug("Received suspend ack",
+			zap.String("sessionID", sessionID))
 
 		// Signal suspend acknowledgment if channel exists
 		sm.sessionSuspendedChanMapMu.RLock()
@@ -434,6 +505,9 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 				sm.logger.Warn("Failed to send suspend acknowledgment - channel full",
 					zap.String("sessionID", sessionID))
 			}
+		} else {
+			sm.logger.Debug("Suspend chan not found",
+				zap.String("sessionID", sessionID))
 		}
 
 		sm.sessionsMu.Lock()
@@ -513,4 +587,115 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 		sm.logger.Error("Received error message",
 			zap.String("error", string(payload)))
 	}
+}
+
+// HandleConnectionEstablished handles a new or resumed connection
+func (sm *SessionManager) HandleConnectionEstablished(sessionID string, conn *MQTTNetBridgeConn, clientID string, timeout time.Duration) error {
+	sm.sessionsMu.Lock()
+	defer sm.sessionsMu.Unlock()
+
+	// Check if session exists
+	session, exists := sm.sessions[sessionID]
+	if exists {
+		// For existing sessions, verify state
+		if session.State == BridgeSessionStateActive {
+			return NewSessionActiveError(sessionID)
+		}
+		// Update existing session
+		session.State = BridgeSessionStateActive
+		session.LastActive = time.Now()
+		session.Connection = conn
+		session.ClientID = clientID
+
+		// Call hook for resumed session
+		if sm.bridge.hooks != nil {
+			if err := sm.bridge.hooks.OnSessionResumed(session); err != nil {
+				sm.logger.Error("Failed to execute OnSessionResumed hooks",
+					zap.Error(err))
+			}
+		}
+	} else {
+		// Create new session
+		session = &SessionInfo{
+			ID:         sessionID,
+			State:      BridgeSessionStateActive,
+			LastActive: time.Now(),
+			Connection: conn,
+			Metadata:   make(map[string]string),
+			ClientID:   clientID,
+			Timeout:    timeout,
+		}
+		sm.sessions[sessionID] = session
+
+		// Call hook for new session
+		if sm.bridge.hooks != nil {
+			if err := sm.bridge.hooks.OnSessionCreated(session); err != nil {
+				sm.logger.Error("Failed to execute OnSessionCreated hooks",
+					zap.Error(err))
+			}
+		}
+	}
+
+	return nil
+}
+
+// UpdateStore updates the session store and loads sessions from it
+func (sm *SessionManager) UpdateStore(store SessionStore) error {
+	sm.sessionsMu.Lock()
+	defer sm.sessionsMu.Unlock()
+
+	// Store existing sessions by client ID for merging
+	existingSessions := make(map[string]*SessionInfo)
+	for _, session := range sm.sessions {
+		existingSessions[session.ClientID] = session
+	}
+
+	// Update store
+	sm.store = store
+
+	// Load sessions from storage
+	sessions, err := store.GetStoredSessions()
+	if err != nil {
+		return fmt.Errorf("failed to get stored sessions: %w", err)
+	}
+
+	// Merge stored sessions with existing ones
+	for id, storedSession := range sessions {
+		// If we have an existing session for this client, keep it
+		if existingSession, exists := existingSessions[storedSession.ClientID]; exists {
+			// Update stored session with existing connection if active
+			if existingSession.State == BridgeSessionStateActive {
+				storedSession.Connection = existingSession.Connection
+				storedSession.State = BridgeSessionStateActive
+				storedSession.LastActive = existingSession.LastActive
+			}
+		}
+
+		// Create new connection for active sessions that don't exist in memory
+		if storedSession.State == BridgeSessionStateActive && storedSession.Connection == nil {
+			conn := &MQTTNetBridgeConn{
+				ctx:        sm.ctx,
+				cancel:     func() {}, // Will be set by the bridge when needed
+				bridge:     sm.bridge,
+				sessionID:  storedSession.ID,
+				readBuf:    make(chan []byte, 100),
+				localAddr:  sm.bridge.Addr(),
+				remoteAddr: &MQTTAddr{network: "mqtt", address: storedSession.ClientID},
+				upTopic:    fmt.Sprintf(sessionUpTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, storedSession.ID),
+				downTopic:  fmt.Sprintf(sessionDownTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, storedSession.ID),
+				role:       "server",
+				connMu:     sync.RWMutex{},
+			}
+			storedSession.Connection = conn
+		}
+
+		// Update or add the session
+		sm.sessions[id] = storedSession
+		sm.logger.Info("Loaded/Updated session from storage",
+			zap.String("sessionID", id),
+			zap.String("state", storedSession.State.String()),
+			zap.String("clientID", storedSession.ClientID))
+	}
+
+	return nil
 }

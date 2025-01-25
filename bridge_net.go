@@ -21,6 +21,7 @@ type MQTTNetBridge struct {
 	mqttClient     mqtt.Client
 	logger         *zap.Logger
 	bridgeID       string // Our "listening address"
+	clientID       string // The client ID of the bridge
 	rootTopic      string
 	rootTopicParts []string
 	qos            byte
@@ -64,11 +65,11 @@ const (
 	suspendAckMsg    = "suspend_ack"
 	resumeMsg        = "resume"
 	resumeAckMsg     = "resume_ack"
-	errorMsg         = "error"
 	disconnectMsg    = "disconnect"
 	disconnectAckMsg = "disconnect_ack"
 
 	// Error types
+	errorMsg            = "error"
 	errSessionActive    = "session_active"
 	errSessionNotFound  = "session_not_found"
 	errInvalidSession   = "invalid_session"
@@ -123,6 +124,7 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...BridgeOpt
 		mqttClient:     cfg.mqttClient,
 		logger:         cfg.logger,
 		bridgeID:       bridgeID,
+		clientID:       uuid.New().String(),
 		rootTopic:      cfg.rootTopic,
 		rootTopicParts: strings.Split(cfg.rootTopic, "/"),
 		qos:            cfg.qos,
@@ -171,10 +173,18 @@ func (b *MQTTNetBridge) Close() error {
 	b.logger.Info("Closing MQTT bridge", zap.String("bridgeID", b.bridgeID))
 	b.cancel() // Cancel the context
 
-	// Close all existing sessions
-	for _, session := range b.sessionManager.sessions {
-		if session.Connection != nil {
-			session.Connection.Close()
+	// Get all sessions first
+	sessions := b.sessionManager.GetAllSessions()
+
+	// Suspend all active sessions
+	for _, session := range sessions {
+		if session.State == BridgeSessionStateActive {
+			// Mark as suspended in memory and trigger hooks
+			if err := b.sessionManager.SuspendSession(session.ID, session.ClientID); err != nil {
+				b.logger.Error("Failed to suspend session during shutdown",
+					zap.String("sessionID", session.ID),
+					zap.Error(err))
+			}
 		}
 	}
 
@@ -228,6 +238,7 @@ type MQTTNetBridgeConn struct {
 	connMu    sync.RWMutex
 	role      string // "client" or "server"
 
+	// Lifecycle message handling
 	respChan chan struct {
 		payload []byte
 		topic   string
@@ -384,11 +395,6 @@ func (c *MQTTNetBridgeConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-// handleDisconnect processes a disconnect message for a session
-func (b *MQTTNetBridge) handleDisconnect(sessionID string) {
-	b.sessionManager.HandleDisconnect(sessionID)
-}
-
 // handleIncomingData processes incoming MQTT messages
 func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message) {
 	payload := b.hooks.OnMessageReceived(msg.Payload())
@@ -405,8 +411,6 @@ func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message)
 	}
 
 	sessionID := parts[len(parts)-2]
-
-	// Handle regular data messages
 	session, exists := b.sessionManager.GetSession(sessionID)
 	if !exists || session.Connection == nil || session.Connection.closed {
 		b.logger.Debug("No active session/connection",
@@ -439,14 +443,11 @@ func (b *MQTTNetBridge) createNewConnection(sessionID string) *MQTTNetBridgeConn
 		upTopic:    fmt.Sprintf(sessionUpTopic, b.rootTopic, b.bridgeID, sessionID),
 		downTopic:  fmt.Sprintf(sessionDownTopic, b.rootTopic, b.bridgeID, sessionID),
 		role:       "server",
+		connMu:     sync.RWMutex{},
 	}
-
-	// Add mutex initialization if not already present
-	conn.connMu = sync.RWMutex{}
 
 	// Subscribe to session up topic for server with QoS 1 to ensure delivery
 	token := b.mqttClient.Subscribe(conn.upTopic, b.qos, b.handleIncomingData)
-
 	if token.Wait() && token.Error() != nil {
 		b.logger.Error("Failed to subscribe to session topic",
 			zap.String("topic", conn.upTopic),
@@ -465,14 +466,15 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 
 	// Parse session options
 	cfg := &SessionConfig{
-		State: BridgeSessionStateActive,
+		State:   BridgeSessionStateActive,
+		Timeout: defaultSessionTimeout,
 	}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
 	sessionID := cfg.SessionID
-	clientID := uuid.New().String()
+	clientID := b.clientID
 
 	// Subscribe to handshake response
 	responseTopic := fmt.Sprintf(handshakeResponseTopic, b.rootTopic, targetBridgeID, clientID)
@@ -481,92 +483,62 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 		topic   string
 	}, 1)
 
-	b.logger.Debug("Subscribing to handshake response topic",
-		zap.String("topic", responseTopic),
-		zap.Duration("elapsed", time.Since(startTime)))
-
-	token := b.mqttClient.Subscribe(responseTopic, b.qos, func(client mqtt.Client, msg mqtt.Message) {
+	// Create subscription handler
+	handler := func(c mqtt.Client, m mqtt.Message) {
+		b.logger.Debug("Received ack",
+			zap.String("topic", string(m.Topic())),
+			zap.String("payload", string(m.Payload())))
 		select {
 		case respChan <- struct {
 			payload []byte
 			topic   string
 		}{
-			payload: msg.Payload(),
-			topic:   msg.Topic(),
+			payload: m.Payload(),
+			topic:   m.Topic(),
 		}:
-			b.logger.Debug("Forwarded handshake response",
-				zap.String("topic", msg.Topic()),
-				zap.ByteString("payload", msg.Payload()),
-				zap.Duration("elapsed", time.Since(startTime)))
 		default:
-			b.logger.Warn("Response channel full",
-				zap.String("topic", msg.Topic()))
+			b.logger.Warn("Response channel full, dropping message",
+				zap.String("topic", m.Topic()))
 		}
-	})
+	}
 
+	// Subscribe to response topic
+	token := b.mqttClient.Subscribe(responseTopic, b.qos, handler)
 	if token.Wait() && token.Error() != nil {
 		return nil, fmt.Errorf("handshake subscribe failed: %v", token.Error())
 	}
 
-	b.logger.Debug("Successfully subscribed to handshake response topic",
-		zap.String("topic", responseTopic),
-		zap.Duration("elapsed", time.Since(startTime)))
-
-	// Send connect request
-	requestTopic := fmt.Sprintf(handshakeRequestTopic, b.rootTopic, targetBridgeID, clientID)
-	var msg string
+	// Send handshake message
+	handshakeTopic := fmt.Sprintf(handshakeRequestTopic, b.rootTopic, targetBridgeID, clientID)
+	msg := fmt.Sprintf("%s:%s", connectMsg, cfg.Timeout.String())
 	if sessionID != "" {
-		msg = fmt.Sprintf("resume:%s", sessionID)
-	} else {
-		msg = connectMsg
+		msg = fmt.Sprintf("%s:%s", resumeMsg, sessionID)
 	}
 
-	b.logger.Debug("Sending connection request",
-		zap.String("topic", requestTopic),
-		zap.String("message", msg),
-		zap.Duration("elapsed", time.Since(startTime)))
-
-	token = b.mqttClient.Publish(requestTopic, b.qos, false, []byte(msg))
+	token = b.mqttClient.Publish(handshakeTopic, b.qos, false, UnsafeBytes(msg))
 	if token.Wait() && token.Error() != nil {
-		return nil, fmt.Errorf("handshake request failed: %v", token.Error())
+		return nil, fmt.Errorf("handshake publish failed: %v", token.Error())
 	}
 
-	b.logger.Debug("Successfully sent connection request, waiting for response",
-		zap.Duration("elapsed", time.Since(startTime)))
-
-	// Wait for connect_ack with timeout
+	// Wait for response
 	select {
 	case resp := <-respChan:
-		b.logger.Debug("Received handshake response",
-			zap.String("topic", resp.topic),
-			zap.ByteString("payload", resp.payload),
-			zap.Duration("elapsed", time.Since(startTime)))
-
-		payload := resp.payload
-		topic := resp.topic
-		topicParts := strings.Split(topic, "/")
-		// ignore root topic (substract length of root topic)
-		topicParts = topicParts[len(b.rootTopicParts):]
-		if len(topicParts) != 5 {
-			return nil, fmt.Errorf("invalid handshake response format")
-		}
-
+		payload := b.hooks.OnMessageReceived(resp.payload)
 		msgParts := strings.Split(UnsafeString(payload), ":")
 		msgType := msgParts[0]
+
 		switch msgType {
-		case connectAckMsg:
+		case connectAckMsg, resumeAckMsg:
+			if len(msgParts) < 4 {
+				return nil, NewBridgeError("dial", "invalid acknowledgment format", nil)
+			}
+
 			sessionID = msgParts[1]
 			upTopic := msgParts[2]
 			downTopic := msgParts[3]
 
-			b.logger.Debug("Processing connection acknowledgment",
-				zap.String("sessionID", sessionID),
-				zap.String("upTopic", upTopic),
-				zap.String("downTopic", downTopic),
-				zap.Duration("elapsed", time.Since(startTime)))
-
-			connCtx, cancel := context.WithCancel(b.ctx)
 			// Create client connection
+			connCtx, cancel := context.WithCancel(b.ctx)
 			conn := &MQTTNetBridgeConn{
 				ctx:        connCtx,
 				cancel:     cancel,
@@ -579,21 +551,17 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 				downTopic:  downTopic,
 				role:       "client",
 				respChan:   respChan,
+				connMu:     sync.RWMutex{},
 			}
 
-			// Store connection
-			b.sessionManager.AddSession(sessionID, &SessionInfo{
-				ID:         sessionID,
-				State:      BridgeSessionStateActive,
-				LastActive: time.Now(),
-				Connection: conn,
-				Metadata:   make(map[string]string),
-				ClientID:   clientID,
-			})
+			conn.SetDeadline(time.Now().Add(cfg.Timeout))
 
-			b.logger.Debug("Subscribing to session down topic",
-				zap.String("topic", conn.downTopic),
-				zap.Duration("elapsed", time.Since(startTime)))
+			// Let SessionManager handle the session creation/resumption
+			err := b.sessionManager.HandleConnectionEstablished(sessionID, conn, clientID, cfg.Timeout)
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
 
 			// Subscribe to session messages
 			token = b.mqttClient.Subscribe(conn.downTopic, b.qos, b.handleIncomingData)
@@ -602,25 +570,20 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 				return nil, fmt.Errorf("session subscribe failed: %v", token.Error())
 			}
 
-			b.logger.Debug("Successfully subscribed to session down topic",
-				zap.String("topic", conn.downTopic),
-				zap.Duration("elapsed", time.Since(startTime)))
-
 			conn.connMu.Lock()
 			conn.connected = true
 			conn.connMu.Unlock()
 
-			// After successful handshake, update session info
-			session, exists := b.sessionManager.GetSession(sessionID)
-			if !exists {
-				conn.Close()
-				return nil, fmt.Errorf("session not found after handshake")
-			}
-			session.State = BridgeSessionStateActive
-			session.LastActive = time.Now()
-			session.Connection = conn
-
-			go conn.handleLifecycleHandshake()
+			go func() {
+				for {
+					select {
+					case resp := <-conn.respChan:
+						conn.bridge.sessionManager.HandleLifecycleMessage(resp.payload, resp.topic)
+					case <-conn.ctx.Done():
+						return
+					}
+				}
+			}()
 
 			b.logger.Info("Connection established",
 				zap.String("sessionID", sessionID),
@@ -634,28 +597,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 				return nil, NewBridgeError("dial", "invalid error message format", nil)
 			}
 			errorType := msgParts[1]
-			var err error
-			switch errorType {
-			case errSessionActive:
-				err = NewSessionActiveError(sessionID)
-			case errSessionNotFound:
-				err = NewSessionNotFoundError(sessionID)
-			case errInvalidSession:
-				err = NewInvalidSessionError(sessionID)
-			case errSessionSuspended:
-				err = NewSessionSuspendedError(sessionID)
-			case "unauthorized":
-				err = NewUnauthorizedError(sessionID)
-			case "failed_to_create_connection":
-				err = NewConnectionFailedError(sessionID, nil)
-			default:
-				err = NewBridgeError("dial", fmt.Sprintf("server error: %s", errorType), nil)
-			}
-			b.logger.Error("Received error from server",
-				zap.String("errorType", errorType),
-				zap.Error(err),
-				zap.Duration("elapsed", time.Since(startTime)))
-			return nil, err
+			return nil, b.sessionManager.HandleSessionError(sessionID, errorType)
 
 		default:
 			return nil, NewBridgeError("dial", fmt.Sprintf("unexpected message type: %s", msgType), nil)
@@ -675,11 +617,38 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 
 // SuspendSession suspends an active session for later resumption
 func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
-	return b.sessionManager.SuspendSession(sessionID)
+	// Get session info first to get clientID
+	session, exists := b.sessionManager.GetSession(sessionID)
+	if !exists {
+		return NewSessionNotFoundError(sessionID)
+	}
+
+	if session.State != BridgeSessionStateActive {
+		return NewSessionSuspendedError(sessionID)
+	}
+
+	// Send suspend message to the server bridge
+	responseTopic := fmt.Sprintf(handshakeRequestTopic, b.rootTopic, session.Connection.remoteAddr, b.clientID)
+	token := b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", suspendMsg, sessionID)))
+	if token.Wait() && token.Error() != nil {
+		return NewBridgeError("suspend", "failed to send suspend message", token.Error())
+	}
+
+	// Wait for suspend acknowledgment
+	time.Sleep(100 * time.Millisecond)
+
+	// Now suspend the session on client side
+	return nil
 }
 
 // ResumeSession attempts to resume a suspended session
 func (b *MQTTNetBridge) ResumeSession(ctx context.Context, targetBridgeID, sessionID string) (net.Conn, error) {
+	session, exists := b.sessionManager.GetSession(sessionID)
+	if exists && session.State == BridgeSessionStateActive {
+		return nil, NewSessionActiveError(sessionID)
+	}
+
+	b.logger.Info("Resuming session", zap.String("sessionID", sessionID))
 	return b.Dial(ctx, targetBridgeID, WithSessionID(sessionID), WithSessionState(BridgeSessionStateActive))
 }
 
@@ -820,6 +789,10 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 
 	switch msgType {
 	case connectMsg:
+		timeout, err := time.ParseDuration(msgParts[1])
+		if err != nil {
+			timeout = defaultSessionTimeout
+		}
 		// Handle new connection
 		sessionID := uuid.New().String()
 		b.logger.Debug("Creating new connection",
@@ -836,7 +809,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 			return
 		}
 
-		b.handleNewConnection(conn, clientID, responseTopic)
+		b.handleNewConnection(conn, clientID, timeout, responseTopic)
 		b.logger.Debug("Completed new connection handling",
 			zap.String("sessionID", sessionID),
 			zap.Duration("elapsed", time.Since(startTime)))
@@ -859,20 +832,15 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 			return
 		}
 
-		if session.State == BridgeSessionStateActive {
+		if session.State != BridgeSessionStateSuspended {
 			// Add clientID info to error logging
-			b.logger.Warn("Attempt to resume active session",
+			b.logger.Warn("Attempt to resume non-suspended session",
 				zap.String("sessionID", sessionID),
+				zap.String("currentState", session.State.String()),
 				zap.String("currentClientID", session.ClientID),
 				zap.String("requestingClientID", clientID),
 				zap.Duration("elapsed", time.Since(startTime)))
 			err := b.sessionManager.HandleSessionError(sessionID, errSessionActive)
-			b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, err.Error())))
-			return
-		}
-
-		if session.State != BridgeSessionStateSuspended {
-			err := b.sessionManager.HandleSessionError(sessionID, errSessionSuspended)
 			b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, err.Error())))
 			return
 		}
@@ -887,7 +855,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 			return
 		}
 
-		b.handleNewConnection(conn, clientID, responseTopic)
+		b.handleNewConnection(conn, clientID, session.Timeout, responseTopic)
 		b.logger.Debug("Completed resume handling",
 			zap.String("sessionID", sessionID),
 			zap.Duration("elapsed", time.Since(startTime)))
@@ -923,117 +891,82 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 			return
 		}
 
-		b.logger.Info("Suspending session",
+		// First send suspend acknowledgment
+		b.logger.Debug("Sending suspend ack",
+			zap.String("topic", responseTopic),
+			zap.String("sessionID", sessionID))
+
+		token := b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", suspendAckMsg, sessionID)))
+		if ok := token.Wait(); !ok {
+			b.logger.Error("Error sending suspend ack",
+				zap.String("topic", responseTopic),
+				zap.String("sessionID", sessionID))
+			return
+		}
+
+		// Then suspend the session
+		err := b.sessionManager.SuspendSession(sessionID, clientID)
+		if err != nil {
+			b.logger.Error("Failed to suspend session",
+				zap.String("sessionID", sessionID),
+				zap.Error(err))
+			b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, err.Error())))
+			return
+		}
+
+		b.logger.Info("Successfully suspended session",
 			zap.String("sessionID", sessionID),
 			zap.String("clientID", clientID))
-
-		b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", suspendAckMsg, sessionID)))
-
-		session.State = BridgeSessionStateSuspended
-		session.LastSuspended = time.Now()
-
-		// Close the connection but keep session info
-		if session.Connection != nil {
-			session.Connection.Close()
-		}
 
 	case disconnectMsg:
-		if len(msgParts) < 2 {
-			b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, errInvalidSession)))
-			return
-		}
-
 		sessionID := msgParts[1]
-		session, exists := b.sessionManager.GetSession(sessionID)
-		if !exists {
-			err := b.sessionManager.HandleSessionError(sessionID, errSessionNotFound)
-			b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, err.Error())))
-			return
-		}
-
-		// Verify the client owns this session
-		if session.ClientID != clientID {
-			b.logger.Warn("Unauthorized disconnect attempt",
+		err := b.sessionManager.SuspendSession(sessionID, clientID)
+		if err != nil {
+			b.logger.Error("Failed to suspend session",
 				zap.String("sessionID", sessionID),
-				zap.String("sessionClientID", session.ClientID),
-				zap.String("requestingClientID", clientID))
-			err := b.sessionManager.HandleSessionError(sessionID, "unauthorized")
+				zap.Error(err))
 			b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, err.Error())))
 			return
 		}
 
-		if session.State != BridgeSessionStateActive {
-			err := b.sessionManager.HandleSessionError(sessionID, errSessionActive)
-			b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, err.Error())))
+		// Send disconnect acknowledgment
+		token := b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", disconnectAckMsg, sessionID)))
+		if ok := token.Wait(); !ok {
+			b.logger.Error("Error sending disconnect ack",
+				zap.String("topic", responseTopic),
+				zap.String("sessionID", sessionID))
 			return
 		}
 
-		b.logger.Info("Disconnecting session",
+		b.logger.Info("Successfully disconnected session",
 			zap.String("sessionID", sessionID),
 			zap.String("clientID", clientID))
-
-		// Send disconnect acknowledgment instead of error message
-		b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", disconnectAckMsg, sessionID)))
-
-		// Mark session as suspended instead of deleting it
-		session.State = BridgeSessionStateSuspended
-
-		b.handleDisconnect(sessionID)
 	}
 }
 
-// handleNewConnection processes a new connection after successful handshake
-func (b *MQTTNetBridge) handleNewConnection(conn *MQTTNetBridgeConn, clientID, responseTopic string) {
-	startTime := time.Now()
-	// Send connection acknowledgment with session details
-	response := fmt.Sprintf("%s:%s:%s:%s", connectAckMsg, conn.sessionID, conn.upTopic, conn.downTopic)
-
-	b.logger.Debug("Sending connect_ack",
-		zap.String("topic", responseTopic),
-		zap.String("response", response),
-		zap.Duration("elapsed", time.Since(startTime)))
-
-	token := b.mqttClient.Publish(responseTopic, b.qos, false, []byte(response))
-	if token.Wait() && token.Error() != nil {
-		b.logger.Error("Failed to send connect_ack",
-			zap.String("clientID", clientID),
-			zap.Error(token.Error()),
-			zap.Duration("elapsed", time.Since(startTime)))
-		conn.Close()
+// handleNewConnection processes a new connection request
+func (b *MQTTNetBridge) handleNewConnection(conn *MQTTNetBridgeConn, clientID string, timeout time.Duration, responseTopic string) {
+	// Let SessionManager handle the session creation
+	err := b.sessionManager.HandleConnectionEstablished(conn.sessionID, conn, clientID, timeout)
+	if err != nil {
+		errMsg := fmt.Sprintf("%s:%s", errorMsg, err.Error())
+		b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(errMsg))
 		return
 	}
 
-	b.logger.Debug("Successfully sent connect_ack",
-		zap.String("sessionID", conn.sessionID),
-		zap.Duration("elapsed", time.Since(startTime)))
+	// Send connection acknowledgment
+	ackMsg := fmt.Sprintf("%s:%s:%s:%s", connectAckMsg, conn.sessionID, conn.upTopic, conn.downTopic)
+	b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(ackMsg))
 
-	// Create or update session info
-	b.sessionManager.AddSession(conn.sessionID, &SessionInfo{
-		ID:         conn.sessionID,
-		ClientID:   clientID,
-		State:      BridgeSessionStateActive,
-		LastActive: time.Now(),
-		Connection: conn,
-		Metadata:   make(map[string]string),
-	})
-
-	// Queue for Accept after successful ack
+	// Queue for Accept
 	select {
 	case b.acceptCh <- conn:
 		conn.connMu.Lock()
 		conn.connected = true
 		conn.connMu.Unlock()
-		b.logger.Info("Connection established",
-			zap.String("sessionID", conn.sessionID),
-			zap.String("clientID", clientID),
-			zap.Duration("elapsed", time.Since(startTime)))
 	default:
-		sessions := b.sessionManager.GetAllSessions()
 		b.logger.Warn("Accept channel full, dropping connection",
-			zap.Int("total_connections", len(sessions)),
-			zap.Int("accept_channel_size", len(b.acceptCh)),
-			zap.String("sessionID", conn.sessionID),
-			zap.Duration("elapsed", time.Since(startTime)))
+			zap.String("sessionID", conn.sessionID))
 		conn.Close()
 	}
 }
@@ -1050,7 +983,25 @@ func (b *MQTTNetBridge) AddHook(hook BridgeHook, config any) error {
 		zap.String("hook", hook.ID()),
 		zap.String("bridgeID", b.bridgeID))
 
-	return b.hooks.Add(hook, config)
+	// First add the hook
+	if err := b.hooks.Add(hook, config); err != nil {
+		return err
+	}
+
+	// Then check if it implements SessionStore
+	if store, ok := hook.(SessionStore); ok {
+		b.logger.Info("Hook implements SessionStore, updating session manager",
+			zap.String("hook", hook.ID()))
+
+		if err := b.sessionManager.UpdateStore(store); err != nil {
+			b.logger.Error("Failed to update session store",
+				zap.String("hook", hook.ID()),
+				zap.Error(err))
+			// Continue even if store update fails since the hook is already added
+		}
+	}
+
+	return nil
 }
 
 // CleanupStaleSessions removes sessions that have been suspended longer than the timeout
@@ -1058,28 +1009,126 @@ func (b *MQTTNetBridge) CleanupStaleSessions(timeout time.Duration) {
 	b.sessionManager.CleanupStaleSessions(timeout)
 }
 
-// StartCleanupTask starts a periodic cleanup of stale sessions
-func (b *MQTTNetBridge) startCleanupTask(interval, timeout time.Duration) {
-	if interval == 0 {
-		interval = 5 * time.Minute // Default to running cleanup every minute
-	}
-
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				b.CleanupStaleSessions(timeout)
-			case <-b.ctx.Done():
-				return
-			}
-		}
-	}()
-}
-
 // DisconnectSession disconnects an active session and cleans it up
 func (b *MQTTNetBridge) DisconnectSession(sessionID string) error {
+	session, exists := b.sessionManager.GetSession(sessionID)
+	if !exists {
+		return NewSessionNotFoundError(sessionID)
+	}
+
+	// Send disconnect request
+	requestTopic := fmt.Sprintf(handshakeRequestTopic, b.rootTopic, session.Connection.remoteAddr.String(), b.clientID)
+	msg := fmt.Sprintf("%s:%s", disconnectMsg, sessionID)
+	token := b.mqttClient.Publish(requestTopic, b.qos, false, []byte(msg))
+	if token.Wait() && token.Error() != nil {
+		return NewBridgeError("disconnect", "disconnect request failed", token.Error())
+	}
+
 	return b.sessionManager.DisconnectSession(sessionID)
+}
+
+// startSessionCleanupTimer starts a timer to clean up a suspended session
+func (b *MQTTNetBridge) startSessionCleanupTimer(sessionID string) {
+	b.logger.Debug("Starting cleanup timer",
+		zap.String("sessionID", sessionID),
+		zap.Duration("timeout", defaultDisconnectTimeout))
+
+	time.Sleep(defaultDisconnectTimeout)
+
+	session, exists := b.sessionManager.GetSession(sessionID)
+	if !exists {
+		return
+	}
+
+	// Only clean up if still suspended and timeout has elapsed
+	if session.State == BridgeSessionStateSuspended &&
+		time.Since(session.LastSuspended) >= defaultDisconnectTimeout {
+		b.sessionManager.RemoveSession(sessionID)
+		b.logger.Debug("Cleaned up suspended session after timeout",
+			zap.String("sessionID", sessionID))
+	}
+}
+
+// HandleLifecycleMessage processes lifecycle messages for sessions
+func (b *MQTTNetBridge) HandleLifecycleMessage(payload []byte, topic string) {
+	msgParts := strings.Split(UnsafeString(payload), ":")
+	msgType := msgParts[0]
+
+	b.logger.Info("Received lifecycle msg",
+		zap.String("type", msgType))
+
+	switch msgType {
+	case suspendAckMsg:
+		if len(msgParts) < 2 {
+			b.logger.Error("Invalid suspend ack format",
+				zap.String("topic", topic),
+				zap.String("payload", string(payload)))
+			return
+		}
+		sessionID := msgParts[1]
+
+		b.logger.Debug("Received suspend ack",
+			zap.String("sessionID", sessionID))
+
+		err := b.sessionManager.SuspendSession(sessionID, b.clientID)
+		if err != nil {
+			b.logger.Error("Failed to suspend session",
+				zap.String("sessionID", sessionID),
+				zap.Error(err))
+		}
+
+	case resumeAckMsg:
+		if len(msgParts) < 2 {
+			b.logger.Error("Invalid resume ack format",
+				zap.String("topic", topic),
+				zap.String("payload", string(payload)))
+			return
+		}
+		sessionID := msgParts[1]
+		session, exists := b.sessionManager.GetSession(sessionID)
+		if exists {
+			session.State = BridgeSessionStateActive
+			session.LastActive = time.Now()
+			b.sessionManager.AddSession(sessionID, session)
+		}
+
+	case disconnectAckMsg:
+		if len(msgParts) < 2 {
+			b.logger.Error("Invalid disconnect ack format",
+				zap.String("topic", topic),
+				zap.String("payload", string(payload)))
+			return
+		}
+		sessionID := msgParts[1]
+		b.logger.Info("Received disconnect ack",
+			zap.String("sessionID", sessionID))
+
+		session, exists := b.sessionManager.GetSession(sessionID)
+		if exists {
+			session.State = BridgeSessionStateClosed
+			// Store connection to close after releasing lock
+			conn := session.Connection
+			session.Connection = nil
+			b.sessionManager.RemoveSession(sessionID)
+
+			// Close connection after releasing lock if it exists
+			if conn != nil {
+				conn.connMu.Lock()
+				conn.closed = true
+				close(conn.readBuf)
+				conn.connMu.Unlock()
+				conn.cancel()
+			}
+		}
+
+	case errorMsg:
+		if len(msgParts) < 2 {
+			b.logger.Error("Invalid error message format",
+				zap.String("topic", topic),
+				zap.String("payload", string(payload)))
+			return
+		}
+		b.logger.Error("Received error message",
+			zap.String("error", string(payload)))
+	}
 }

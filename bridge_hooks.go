@@ -2,55 +2,99 @@ package bridge
 
 import (
 	"fmt"
-	"sync"
-	"sync/atomic"
 
 	"go.uber.org/zap"
 )
 
 const (
 	OnMessageReceived byte = iota
+	OnSessionCreated
+	OnSessionResumed
+	OnSessionSuspended
+	OnSessionDisconnected
 )
 
-// BridgeHook provides an interface for handling bridge-related events.
+// BridgeHook defines the interface for bridge hooks
 type BridgeHook interface {
-	OnMessageReceived(msg []byte) []byte
-	Provides(b byte) bool
-	Init(config any) error
-	Stop() error
+	// ID returns the unique identifier for this hook
 	ID() string
+
+	// Init initializes the hook with the provided configuration
+	Init(config any) error
+
+	// Stop gracefully stops the hook
+	Stop() error
+
+	// Provides indicates whether this hook provides the specified functionality
+	Provides(b byte) bool
+
+	// OnMessageReceived processes incoming messages
+	OnMessageReceived(msg []byte) []byte
+
+	// OnSessionCreated is called when a new session is created
+	OnSessionCreated(session *SessionInfo) error
+
+	// OnSessionResumed is called when a session is resumed
+	OnSessionResumed(session *SessionInfo) error
+
+	// OnSessionSuspended is called when a session is suspended
+	OnSessionSuspended(session *SessionInfo) error
+
+	// OnSessionDisconnected is called when a session is disconnected
+	OnSessionDisconnected(session *SessionInfo) error
 }
 
-// BridgeHooks manages a collection of bridge hooks.
+// BridgeHooks manages a collection of hooks
 type BridgeHooks struct {
-	internal atomic.Value
-	qty      int64
-	wg       sync.WaitGroup
-	sync.RWMutex
 	logger *zap.Logger
+	Hooks  []BridgeHook
 }
 
-// OnMessageReceived is called when a message is received from a bridge connection.
-func (h *BridgeHooks) OnMessageReceived(msg []byte) []byte {
-	h.RLock()
-	defer h.RUnlock()
+// Add adds a new hook to the collection
+func (h *BridgeHooks) Add(hook BridgeHook, config any) error {
+	if err := hook.Init(config); err != nil {
+		return fmt.Errorf("failed to initialize hook: %v", err)
+	}
+	h.Hooks = append(h.Hooks, hook)
+	return nil
+}
 
-	for _, hook := range h.GetAll() {
+// OnMessageReceived processes a message through all hooks
+func (h *BridgeHooks) OnMessageReceived(msg []byte) []byte {
+	if h == nil {
+		return msg
+	}
+	result := msg
+	for _, hook := range h.Hooks {
 		if hook.Provides(OnMessageReceived) {
-			msg = hook.OnMessageReceived(msg)
+			result = hook.OnMessageReceived(result)
 		}
 	}
-	return msg
+	return result
+}
+
+// Stop stops all hooks
+func (h *BridgeHooks) Stop() {
+	if h == nil {
+		return
+	}
+	for _, hook := range h.Hooks {
+		if err := hook.Stop(); err != nil {
+			h.logger.Error("Failed to stop hook",
+				zap.String("hook", hook.ID()),
+				zap.Error(err))
+		}
+	}
 }
 
 // Len returns the number of hooks added.
 func (h *BridgeHooks) Len() int64 {
-	return atomic.LoadInt64(&h.qty)
+	return int64(len(h.Hooks))
 }
 
 // Provides returns true if any one hook provides any of the requested hook methods.
 func (h *BridgeHooks) Provides(b ...byte) bool {
-	for _, hook := range h.GetAll() {
+	for _, hook := range h.Hooks {
 		for _, hb := range b {
 			if hook.Provides(hb) {
 				return true
@@ -60,49 +104,79 @@ func (h *BridgeHooks) Provides(b ...byte) bool {
 	return false
 }
 
-// Add adds and initializes a new hook.
-func (h *BridgeHooks) Add(hook BridgeHook, config any) error {
-	h.Lock()
-	defer h.Unlock()
+// GetAll returns a slice of all the hooks.
+func (h *BridgeHooks) GetAll() []BridgeHook {
+	return h.Hooks
+}
 
-	err := hook.Init(config)
-	if err != nil {
-		return fmt.Errorf("failed initialising %s hook: %w", hook.ID(), err)
+// OnSessionCreated calls the OnSessionCreated hook for all hooks that provide it
+func (h *BridgeHooks) OnSessionCreated(session *SessionInfo) error {
+	if h == nil {
+		return nil
 	}
-
-	i, ok := h.internal.Load().([]BridgeHook)
-	if !ok {
-		i = []BridgeHook{}
+	for _, hook := range h.Hooks {
+		if hook.Provides(OnSessionCreated) {
+			if err := hook.OnSessionCreated(session); err != nil {
+				h.logger.Error("Failed to execute OnSessionCreated hook",
+					zap.String("hook", hook.ID()),
+					zap.Error(err))
+				return err
+			}
+		}
 	}
-
-	i = append(i, hook)
-	h.internal.Store(i)
-	atomic.AddInt64(&h.qty, 1)
-	h.wg.Add(1)
-
 	return nil
 }
 
-// GetAll returns a slice of all the hooks.
-func (h *BridgeHooks) GetAll() []BridgeHook {
-	i, ok := h.internal.Load().([]BridgeHook)
-	if !ok {
-		return []BridgeHook{}
+// OnSessionResumed calls the OnSessionResumed hook for all hooks that provide it
+func (h *BridgeHooks) OnSessionResumed(session *SessionInfo) error {
+	if h == nil {
+		return nil
 	}
-	return i
+	for _, hook := range h.Hooks {
+		if hook.Provides(OnSessionResumed) {
+			if err := hook.OnSessionResumed(session); err != nil {
+				h.logger.Error("Failed to execute OnSessionResumed hook",
+					zap.String("hook", hook.ID()),
+					zap.Error(err))
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-// Stop indicates all attached hooks to gracefully end.
-func (h *BridgeHooks) Stop() {
-	go func() {
-		for _, hook := range h.GetAll() {
-			if err := hook.Stop(); err != nil {
-				h.logger.Error("problem stopping hook",
-					zap.Error(err),
-					zap.String("hook", hook.ID()))
+// OnSessionSuspended calls the OnSessionSuspended hook for all hooks that provide it
+func (h *BridgeHooks) OnSessionSuspended(session *SessionInfo) error {
+	if h == nil {
+		return nil
+	}
+	for _, hook := range h.Hooks {
+		if hook.Provides(OnSessionSuspended) {
+			if err := hook.OnSessionSuspended(session); err != nil {
+				h.logger.Error("Failed to execute OnSessionSuspended hook",
+					zap.String("hook", hook.ID()),
+					zap.Error(err))
+				return err
 			}
-			h.wg.Done()
 		}
-	}()
-	h.wg.Wait()
+	}
+	return nil
+}
+
+// OnSessionDisconnected calls the OnSessionDisconnected hook for all hooks that provide it
+func (h *BridgeHooks) OnSessionDisconnected(session *SessionInfo) error {
+	if h == nil {
+		return nil
+	}
+	for _, hook := range h.Hooks {
+		if hook.Provides(OnSessionDisconnected) {
+			if err := hook.OnSessionDisconnected(session); err != nil {
+				h.logger.Error("Failed to execute OnSessionDisconnected hook",
+					zap.String("hook", hook.ID()),
+					zap.Error(err))
+				return err
+			}
+		}
+	}
+	return nil
 }
