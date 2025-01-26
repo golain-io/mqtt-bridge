@@ -41,6 +41,13 @@ var (
 	ErrSessionSuspended = &SessionError{BridgeError: BridgeError{Message: "session is suspended"}}
 	ErrUnauthorized     = &SessionError{BridgeError: BridgeError{Message: "unauthorized operation"}}
 	ErrConnectionFailed = &SessionError{BridgeError: BridgeError{Message: "failed to create connection"}}
+
+	// Additional error types
+	ErrGeneric        = &SessionError{BridgeError: BridgeError{Message: "error"}}
+	ErrSessionClosed  = &SessionError{BridgeError: BridgeError{Message: "session is closed"}}
+	ErrInvalidState   = &SessionError{BridgeError: BridgeError{Message: "invalid session state"}}
+	ErrSessionExpired = &SessionError{BridgeError: BridgeError{Message: "session has expired"}}
+	ErrMaxSessions    = &SessionError{BridgeError: BridgeError{Message: "maximum number of sessions reached"}}
 )
 
 // Error constructors for common operations

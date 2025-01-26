@@ -92,7 +92,7 @@ func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger) *SessionManage
 	}
 
 	// Start cleanup task
-	sm.startCleanupTask(1*time.Second, defaultSessionTimeout)
+	sm.startCleanupTask(defaultCleanupInterval, defaultSessionTimeout)
 
 	return sm
 }
@@ -488,9 +488,6 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 			return
 		}
 		sessionID := msgParts[1]
-
-		sm.logger.Debug("Received suspend ack",
-			zap.String("sessionID", sessionID))
 
 		// Signal suspend acknowledgment if channel exists
 		sm.sessionSuspendedChanMapMu.RLock()

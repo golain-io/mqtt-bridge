@@ -337,6 +337,28 @@ func TestSessionErrors(t *testing.T) {
 		err := bridges.clientBridge.SuspendSession("non-existent-session")
 		assert.Error(t, err)
 		assert.IsType(t, &SessionError{}, err)
+		assert.Equal(t, "session not found", err.(*SessionError).Message)
+	})
+
+	t.Run("Already Active Session", func(t *testing.T) {
+		// Establish first connection
+		ctx := context.Background()
+		conn, err := bridges.clientBridge.Dial(ctx, "session-test-server")
+		assert.NoError(t, err)
+		defer conn.Close()
+		sessionID := conn.(*MQTTNetBridgeConn).sessionID
+
+		// Try to resume the already active session
+		_, err = bridges.clientBridge.ResumeSession(ctx, "session-test-server", sessionID)
+		assert.Error(t, err)
+		assert.IsType(t, &SessionError{}, err)
+		assert.Equal(t, "session is already active", err.(*SessionError).Message)
+
+		// Try to create a new connection with same session ID
+		_, err = bridges.clientBridge.Dial(ctx, "session-test-server", WithSessionID(sessionID))
+		assert.Error(t, err)
+		assert.IsType(t, &SessionError{}, err)
+		assert.Equal(t, "session is already active", err.(*SessionError).Message)
 	})
 
 	t.Run("Invalid State Transitions", func(t *testing.T) {
@@ -430,6 +452,18 @@ func TestSessionDisconnect(t *testing.T) {
 		session, exists := bridges.serverBridge.sessionManager.GetSession(sessionID)
 		assert.True(t, exists)
 		assert.Equal(t, BridgeSessionStateActive, session.State)
+	})
+
+	t.Run("Resume Session Without an Active Connection", func(t *testing.T) {
+		// Establish connection
+		ctx := context.Background()
+		_, err := bridges.clientBridge.Dial(ctx, "session-test-server", WithSessionID("test-session"))
+		assert.Error(t, err)
+		assert.IsType(t, ErrSessionActive, err)
+
+		// Verify session is active
+		_, exists := bridges.serverBridge.sessionManager.GetSession("test-session")
+		assert.False(t, exists)
 	})
 }
 
