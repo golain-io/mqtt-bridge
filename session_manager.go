@@ -25,6 +25,7 @@ type SessionInfo struct {
 // SessionStore defines the interface for session storage providers
 type SessionStore interface {
 	GetStoredSessions() (map[string]*SessionInfo, error)
+	SaveSession(session *SessionInfo) error
 }
 
 // SessionManager handles session lifecycle and state management
@@ -55,7 +56,7 @@ type SessionManager struct {
 }
 
 // NewSessionManager creates a new session manager
-func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger) *SessionManager {
+func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger, cleanUpInterval time.Duration) *SessionManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Initialize with default values
@@ -92,7 +93,7 @@ func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger) *SessionManage
 	}
 
 	// Start cleanup task
-	sm.startCleanupTask(defaultCleanupInterval, defaultSessionTimeout)
+	sm.startCleanupTask(cleanUpInterval, defaultSessionTimeout)
 
 	return sm
 }
@@ -197,41 +198,54 @@ func (sm *SessionManager) CreateSession(sessionID, clientID string, timeout time
 }
 
 // SuspendSession suspends an active session
-func (sm *SessionManager) SuspendSession(sessionID, clientID string) error {
+func (sm *SessionManager) SuspendSession(sessionID string, clientID string) error {
 	sm.sessionsMu.Lock()
+	defer sm.sessionsMu.Unlock()
+
 	session, exists := sm.sessions[sessionID]
 	if !exists {
-		sm.sessionsMu.Unlock()
 		return NewSessionNotFoundError(sessionID)
 	}
 
-	// Verify the client owns this session
+	// Verify client owns this session
 	if session.ClientID != clientID {
-		sm.sessionsMu.Unlock()
 		return NewUnauthorizedError(sessionID)
 	}
 
+	// Only suspend active sessions
 	if session.State != BridgeSessionStateActive {
-		sm.sessionsMu.Unlock()
-		return NewBridgeError("suspend", fmt.Sprintf("session %s is not active", sessionID), nil)
+		return NewInvalidStateError(sessionID)
 	}
 
+	// Store connection to close after releasing lock
+	conn := session.Connection
+
+	// Update session state
 	session.State = BridgeSessionStateSuspended
 	session.LastSuspended = time.Now()
-	sm.sessionsMu.Unlock()
+	session.Connection = nil
+	sm.sessions[sessionID] = session
 
-	// Call hook for suspended session
-	if sm.bridge.hooks != nil {
-		if err := sm.bridge.hooks.OnSessionSuspended(session); err != nil {
-			sm.logger.Error("Failed to execute OnSessionSuspended hooks",
+	// Call hooks after updating state
+	if sm.store != nil {
+		if err := sm.store.SaveSession(session); err != nil {
+			sm.logger.Error("Failed to save session state",
+				zap.String("sessionID", sessionID),
 				zap.Error(err))
 		}
 	}
 
-	if session.Connection != nil {
-		session.Connection.closed = true
-		close(session.Connection.readBuf)
-		session.Connection = nil
+	// Close connection after releasing lock if it exists
+	if conn != nil {
+		// Cancel context and mark as closed
+		conn.cancel()
+		conn.closeMu.Lock()
+		conn.closed = true
+		conn.closeMu.Unlock()
+
+		// Let the connection's Close() method handle channel closing
+		// This avoids the double close issue
+		conn.Close()
 	}
 
 	return nil

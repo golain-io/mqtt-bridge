@@ -138,3 +138,8 @@ func NewBridgeError(op, message string, err error) error {
 		Err:     err,
 	}
 }
+
+// NewInvalidStateError creates a new error for invalid session state
+func NewInvalidStateError(sessionID string) error {
+	return NewBridgeError("suspend", fmt.Sprintf("session %s is not active", sessionID), nil)
+}

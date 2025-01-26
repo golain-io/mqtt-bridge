@@ -12,21 +12,23 @@ type BridgeOption func(*BridgeConfig)
 
 // BridgeConfig holds bridge-specific configuration
 type BridgeConfig struct {
-	rootTopic  string
-	qos        byte
-	logger     *zap.Logger
-	mqttClient mqtt.Client
-	rateLimit  float64
-	rateBurst  int
-	maxConns   int
+	rootTopic       string
+	qos             byte
+	logger          *zap.Logger
+	mqttClient      mqtt.Client
+	rateLimit       float64
+	rateBurst       int
+	maxConns        int
+	cleanUpInterval time.Duration
 }
 
 const (
-	defaultRootTopic = "golain"
-	defaultQoS       = byte(1)
-	defaultRateLimit = 100  // Default operations per second
-	defaultRateBurst = 200  // Default burst size
-	defaultConnLimit = 1000 // Default maximum concurrent connections
+	defaultRootTopic       = "golain"
+	defaultQoS             = byte(1)
+	defaultRateLimit       = 100  // Default operations per second
+	defaultRateBurst       = 200  // Default burst size
+	defaultConnLimit       = 1000 // Default maximum concurrent connections
+	defaultCleanUpInterval = 30 * time.Minute
 )
 
 // WithMQTTClient sets the MQTT client for the bridge
@@ -47,6 +49,12 @@ func WithLogger(logger *zap.Logger) BridgeOption {
 func WithRootTopic(topic string) BridgeOption {
 	return func(cfg *BridgeConfig) {
 		cfg.rootTopic = topic
+	}
+}
+
+func WithCleanUpInterval(interval time.Duration) BridgeOption {
+	return func(cfg *BridgeConfig) {
+		cfg.cleanUpInterval = interval
 	}
 }
 

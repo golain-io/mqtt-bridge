@@ -187,3 +187,112 @@ func handleTestConnection(t *testing.T, conn io.ReadWriteCloser) {
 		t.Logf("Server echoed: %s", string(buf[:n]))
 	}
 }
+
+func TestMQTTBridgeUnsubscribe(t *testing.T) {
+	// Setup logger
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+
+	// Create MQTT clients
+	serverClient := mqtt.NewClient(mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-server-unsub"))
+
+	if token := serverClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect server to MQTT: %v", token.Error())
+	}
+	defer serverClient.Disconnect(250)
+
+	// Create bridge listener
+	serverBridgeID := "test-server-unsub"
+	rootTopic := "/vedant/unsub"
+	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+		WithQoS(2),
+	)
+	defer listener.Close()
+
+	// Create client MQTT client
+	clientClient := mqtt.NewClient(mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-client-unsub"))
+
+	if token := clientClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect client to MQTT: %v", token.Error())
+	}
+	defer clientClient.Disconnect(250)
+
+	// Create client bridge
+	clientBridgeID := "test-client-unsub"
+	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger))
+	defer clientBridge.Close()
+
+	// Start server goroutine
+	serverConn := make(chan io.ReadWriteCloser, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			t.Errorf("Accept error: %v", err)
+			return
+		}
+		serverConn <- conn
+	}()
+
+	// Connect client to server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	clientConn, err := clientBridge.Dial(ctx, serverBridgeID)
+	if err != nil {
+		t.Fatalf("Failed to connect to server: %v", err)
+	}
+
+	// Wait for server connection
+	var conn io.ReadWriteCloser
+	select {
+	case conn = <-serverConn:
+		t.Log("Server accepted connection")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for server connection")
+	}
+
+	// Allow time for subscriptions to be established
+	time.Sleep(500 * time.Millisecond)
+
+	// Test sending data before closing
+	testMsg := "test message"
+	_, err = clientConn.Write([]byte(testMsg))
+	assert.NoError(t, err)
+
+	// Read response with timeout
+	buf := make([]byte, 1024)
+	if tc, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+		tc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	}
+	n, err := conn.Read(buf)
+	assert.NoError(t, err)
+	assert.Equal(t, testMsg, string(buf[:n]))
+
+	// Close client connection
+	clientConn.Close()
+
+	// Wait a bit for the connection to fully close
+	time.Sleep(1 * time.Second)
+
+	// Try to send data after closing
+	_, err = clientConn.Write([]byte("should not work"))
+	assert.Error(t, err, "Write should fail after connection is closed")
+
+	// Try to read data after closing - should timeout or error
+	if tc, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+		tc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	}
+	_, err = conn.Read(buf)
+	assert.Error(t, err, "Read should fail after connection is closed")
+
+	// Close server connection
+	conn.Close()
+}

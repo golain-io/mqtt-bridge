@@ -50,6 +50,7 @@ func setupTestSessionManager(t *testing.T) (*testBridges, func()) {
 		WithRootTopic(rootTopic),
 		WithLogger(logger),
 		WithQoS(1),
+		WithCleanUpInterval(20*time.Second),
 	)
 
 	// Create client bridge
@@ -168,7 +169,7 @@ func TestSessionLifecycle(t *testing.T) {
 		defer cleanup()
 		// Establish connection
 		ctx := context.Background()
-		conn, err := bridges.clientBridge.Dial(ctx, "session-test-server", WithSessionTimeout(2*time.Second))
+		conn, err := bridges.clientBridge.Dial(ctx, "session-test-server", WithSessionTimeout(1*time.Second))
 		assert.NoError(t, err)
 		sessionID := conn.(*MQTTNetBridgeConn).sessionID
 
@@ -179,11 +180,11 @@ func TestSessionLifecycle(t *testing.T) {
 		_, exists := bridges.serverBridge.sessionManager.GetSession(sessionID)
 		assert.False(t, exists)
 
-		// Verify we can't resume cleaned up session
+		// // Verify we can't resume cleaned up session
 		_, err = bridges.clientBridge.ResumeSession(ctx, "session-test-server", sessionID)
 		assert.Error(t, err)
 
-		// Verify we can't suspend cleaned up session
+		// // Verify we can't suspend cleaned up session
 		err = bridges.clientBridge.SuspendSession(sessionID)
 		assert.Error(t, err)
 	})
@@ -202,7 +203,7 @@ func TestSessionLifecycle(t *testing.T) {
 		// Establish second connection
 		conn2, err := bridges.clientBridge.Dial(ctx, "session-test-server")
 		assert.NoError(t, err)
-		defer conn2.Close()
+		// defer conn2.Close()
 		sessionID2 := conn2.(*MQTTNetBridgeConn).sessionID
 
 		// Verify sessions are different
@@ -218,12 +219,12 @@ func TestSessionLifecycle(t *testing.T) {
 		assert.Equal(t, BridgeSessionStateSuspended, session1.State)
 		assert.Equal(t, BridgeSessionStateActive, session2.State)
 
-		// Resume first session
+		// // Resume first session
 		conn1Resumed, err := bridges.clientBridge.ResumeSession(ctx, "session-test-server", sessionID1)
 		assert.NoError(t, err)
 		defer conn1Resumed.Close()
 
-		// Verify both sessions are active
+		// // Verify both sessions are active
 		session1, _ = bridges.serverBridge.sessionManager.GetSession(sessionID1)
 		session2, _ = bridges.serverBridge.sessionManager.GetSession(sessionID2)
 		assert.Equal(t, BridgeSessionStateActive, session1.State)
@@ -318,23 +319,10 @@ func TestSessionLifecycle(t *testing.T) {
 }
 
 func TestSessionErrors(t *testing.T) {
-	bridges, cleanup := setupTestSessionManager(t)
-	defer cleanup()
-
-	// Start server goroutine to accept connections
-	serverErr := make(chan error, 1)
-	go func() {
-		for {
-			conn, err := bridges.serverBridge.Accept()
-			if err != nil {
-				serverErr <- err
-				return
-			}
-			go echoHandler(t, conn)
-		}
-	}()
 
 	t.Run("Session Not Found", func(t *testing.T) {
+		bridges, cleanup := setupTestSessionManager(t)
+		defer cleanup()
 		err := bridges.clientBridge.SuspendSession("non-existent-session")
 		assert.Error(t, err)
 		if errors.Is(err, ErrSessionNotFound) {
@@ -345,6 +333,8 @@ func TestSessionErrors(t *testing.T) {
 	})
 
 	t.Run("Already Active Session", func(t *testing.T) {
+		bridges, cleanup := setupTestSessionManager(t)
+		defer cleanup()
 		// Establish first connection
 		ctx := context.Background()
 		conn, err := bridges.clientBridge.Dial(ctx, "session-test-server")
@@ -372,6 +362,8 @@ func TestSessionErrors(t *testing.T) {
 	})
 
 	t.Run("Invalid State Transitions", func(t *testing.T) {
+		bridges, cleanup := setupTestSessionManager(t)
+		defer cleanup()
 		// Establish connection
 		ctx := context.Background()
 		conn, err := bridges.clientBridge.Dial(ctx, "session-test-server")
@@ -393,23 +385,10 @@ func TestSessionErrors(t *testing.T) {
 }
 
 func TestSessionDisconnect(t *testing.T) {
-	bridges, cleanup := setupTestSessionManager(t)
-	defer cleanup()
-
-	// Start server goroutine to accept connections
-	serverErr := make(chan error, 1)
-	go func() {
-		for {
-			conn, err := bridges.serverBridge.Accept()
-			if err != nil {
-				serverErr <- err
-				return
-			}
-			go echoHandler(t, conn)
-		}
-	}()
 
 	t.Run("Session Disconnect", func(t *testing.T) {
+		bridges, cleanup := setupTestSessionManager(t)
+		defer cleanup()
 		// Establish connection
 		ctx := context.Background()
 		conn, err := bridges.clientBridge.Dial(ctx, "session-test-server", WithSessionTimeout(2*time.Second))
@@ -443,6 +422,8 @@ func TestSessionDisconnect(t *testing.T) {
 	})
 
 	t.Run("Quick Disconnect and Resume", func(t *testing.T) {
+		bridges, cleanup := setupTestSessionManager(t)
+		defer cleanup()
 		// Establish connection
 		ctx := context.Background()
 		conn, err := bridges.clientBridge.Dial(ctx, "session-test-server")
@@ -465,6 +446,8 @@ func TestSessionDisconnect(t *testing.T) {
 	})
 
 	t.Run("Resume Session Without an Active Connection", func(t *testing.T) {
+		bridges, cleanup := setupTestSessionManager(t)
+		defer cleanup()
 		// Establish connection
 		ctx := context.Background()
 		_, err := bridges.clientBridge.Dial(ctx, "session-test-server", WithSessionID("test-session"))
