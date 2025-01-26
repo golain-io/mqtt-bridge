@@ -352,7 +352,9 @@ func (c *MQTTNetBridgeConn) Close() error {
 		// Context already cancelled, we're being closed by DisconnectSession
 		return nil
 	default:
-		// Check if session is still active before trying to disconnect
+		c.bridge.mqttClient.Unsubscribe(c.downTopic)
+		c.bridge.mqttClient.Unsubscribe(c.upTopic)
+
 		if session, exists := c.bridge.sessionManager.GetSession(c.sessionID); exists && session.State == BridgeSessionStateActive {
 			if err := c.bridge.DisconnectSession(c.sessionID); err != nil {
 				c.bridge.logger.Error("Failed to disconnect session during close",
@@ -375,14 +377,12 @@ func (c *MQTTNetBridgeConn) RemoteAddr() net.Addr {
 }
 
 func (c *MQTTNetBridgeConn) SetDeadline(t time.Time) error {
-	c.readMu.Lock()
-	c.writeMu.Lock()
-	defer c.readMu.Unlock()
-	defer c.writeMu.Unlock()
-
-	c.deadline = t
-	c.wDeadline = t
-	return nil
+	// First set read deadline
+	if err := c.SetReadDeadline(t); err != nil {
+		return err
+	}
+	// Then set write deadline
+	return c.SetWriteDeadline(t)
 }
 
 func (c *MQTTNetBridgeConn) SetReadDeadline(t time.Time) error {
@@ -1013,7 +1013,7 @@ func (b *MQTTNetBridge) AddHook(hook BridgeHook, config any) error {
 	}
 
 	// Then check if it implements SessionStore
-	if store, ok := hook.(SessionStore); ok {
+	if store, ok := hook.(ISessionStore); ok {
 		b.logger.Info("Hook implements SessionStore, updating session manager",
 			zap.String("hook", hook.ID()))
 

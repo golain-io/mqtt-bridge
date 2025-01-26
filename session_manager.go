@@ -22,10 +22,9 @@ type SessionInfo struct {
 	Timeout       time.Duration
 }
 
-// SessionStore defines the interface for session storage providers
-type SessionStore interface {
+// ISessionStore defines the interface for session storage providers
+type ISessionStore interface {
 	GetStoredSessions() (map[string]*SessionInfo, error)
-	SaveSession(session *SessionInfo) error
 }
 
 // SessionManager handles session lifecycle and state management
@@ -34,7 +33,7 @@ type SessionManager struct {
 	logger *zap.Logger
 
 	// Session storage
-	store SessionStore
+	store ISessionStore
 
 	// Session management
 	sessions   map[string]*SessionInfo
@@ -74,7 +73,7 @@ func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger, cleanUpInterva
 	// Check if any hook implements SessionStore
 	if bridge.hooks != nil {
 		for _, hook := range bridge.hooks.Hooks {
-			if store, ok := hook.(SessionStore); ok {
+			if store, ok := hook.(ISessionStore); ok {
 				sm.store = store
 				sm.logger.Debug("Found hook implementing SessionStore",
 					zap.String("hookID", hook.ID()))
@@ -227,10 +226,9 @@ func (sm *SessionManager) SuspendSession(sessionID string, clientID string) erro
 	sm.sessions[sessionID] = session
 
 	// Call hooks after updating state
-	if sm.store != nil {
-		if err := sm.store.SaveSession(session); err != nil {
-			sm.logger.Error("Failed to save session state",
-				zap.String("sessionID", sessionID),
+	if sm.bridge.hooks != nil {
+		if err := sm.bridge.hooks.OnSessionSuspended(session); err != nil {
+			sm.logger.Error("Failed to execute OnSessionSuspended hooks",
 				zap.Error(err))
 		}
 	}
@@ -651,7 +649,7 @@ func (sm *SessionManager) HandleConnectionEstablished(sessionID string, conn *MQ
 }
 
 // UpdateStore updates the session store and loads sessions from it
-func (sm *SessionManager) UpdateStore(store SessionStore) error {
+func (sm *SessionManager) UpdateStore(store ISessionStore) error {
 	sm.sessionsMu.Lock()
 	defer sm.sessionsMu.Unlock()
 
