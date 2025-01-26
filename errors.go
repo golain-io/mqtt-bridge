@@ -20,6 +20,15 @@ func (e *BridgeError) Unwrap() error {
 	return e.Err
 }
 
+// Is implements the interface for errors.Is functionality
+func (e *BridgeError) Is(target error) bool {
+	t, ok := target.(*BridgeError)
+	if !ok {
+		return false
+	}
+	return e.Message == t.Message
+}
+
 // SessionError represents session-specific errors
 type SessionError struct {
 	BridgeError
@@ -31,6 +40,15 @@ func (e *SessionError) Error() string {
 		return fmt.Sprintf("%s: session %s: %s: %v", e.Op, e.SessionID, e.Message, e.Err)
 	}
 	return fmt.Sprintf("%s: session %s: %s", e.Op, e.SessionID, e.Message)
+}
+
+// Is implements the interface for errors.Is functionality
+func (e *SessionError) Is(target error) bool {
+	t, ok := target.(*SessionError)
+	if !ok {
+		return false
+	}
+	return e.Message == t.Message
 }
 
 // Specific error types for different scenarios

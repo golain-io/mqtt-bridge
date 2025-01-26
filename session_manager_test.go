@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -336,8 +337,11 @@ func TestSessionErrors(t *testing.T) {
 	t.Run("Session Not Found", func(t *testing.T) {
 		err := bridges.clientBridge.SuspendSession("non-existent-session")
 		assert.Error(t, err)
-		assert.IsType(t, &SessionError{}, err)
-		assert.Equal(t, "session not found", err.(*SessionError).Message)
+		if errors.Is(err, ErrSessionNotFound) {
+			t.Logf("Expected error: %v", err)
+		} else {
+			t.Errorf("Unexpected error: %v", err)
+		}
 	})
 
 	t.Run("Already Active Session", func(t *testing.T) {
@@ -351,14 +355,20 @@ func TestSessionErrors(t *testing.T) {
 		// Try to resume the already active session
 		_, err = bridges.clientBridge.ResumeSession(ctx, "session-test-server", sessionID)
 		assert.Error(t, err)
-		assert.IsType(t, &SessionError{}, err)
-		assert.Equal(t, "session is already active", err.(*SessionError).Message)
+		if errors.Is(err, ErrSessionActive) {
+			t.Logf("Expected error: %v", err)
+		} else {
+			t.Errorf("Unexpected error: %v", err)
+		}
 
 		// Try to create a new connection with same session ID
 		_, err = bridges.clientBridge.Dial(ctx, "session-test-server", WithSessionID(sessionID))
 		assert.Error(t, err)
-		assert.IsType(t, &SessionError{}, err)
-		assert.Equal(t, "session is already active", err.(*SessionError).Message)
+		if errors.Is(err, ErrSessionActive) {
+			t.Logf("Expected error: %v", err)
+		} else {
+			t.Errorf("Unexpected error: %v", err)
+		}
 	})
 
 	t.Run("Invalid State Transitions", func(t *testing.T) {
