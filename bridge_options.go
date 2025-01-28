@@ -114,9 +114,10 @@ type SessionOption func(*SessionConfig)
 
 // SessionConfig holds session-specific configuration
 type SessionConfig struct {
-	SessionID string
-	State     BridgeSessionState
-	Timeout   time.Duration
+	SessionID   string
+	State       BridgeSessionState
+	Timeout     time.Duration
+	DialTimeout time.Duration
 }
 
 // WithSessionID sets a specific session ID for connection
@@ -130,6 +131,12 @@ func WithSessionID(sessionID string) SessionOption {
 func WithSessionState(state BridgeSessionState) SessionOption {
 	return func(cfg *SessionConfig) {
 		cfg.State = state
+	}
+}
+
+func WithDialTimeout(timeout time.Duration) SessionOption {
+	return func(cfg *SessionConfig) {
+		cfg.DialTimeout = timeout
 	}
 }
 

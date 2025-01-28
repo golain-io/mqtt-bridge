@@ -82,9 +82,9 @@ const (
 	errMaxSessions      = "max_sessions"
 
 	// Session management
-	defaultSessionTimeout = 30 * time.Minute // Default timeout for suspended sessions
-
-	defaultDisconnectTimeout = 2 * time.Second // Time to wait before cleaning up disconnected sessions
+	defaultSessionTimeout    = 30 * time.Minute // Default timeout for suspended sessions
+	defaultDialTimeout       = 5 * time.Second  // Default timeout for dial operations
+	defaultDisconnectTimeout = 1 * time.Minute  // Time to wait before cleaning up disconnected sessions
 )
 
 type mqttResolver struct {
@@ -472,8 +472,9 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 
 	// Parse session options
 	cfg := &SessionConfig{
-		State:   BridgeSessionStateActive,
-		Timeout: defaultSessionTimeout,
+		State:       BridgeSessionStateActive,
+		Timeout:     defaultSessionTimeout,
+		DialTimeout: defaultDialTimeout,
 	}
 	for _, opt := range opts {
 		opt(cfg)
@@ -610,7 +611,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 			return nil, NewBridgeError("dial", fmt.Sprintf("unexpected message type: %s", msgType), nil)
 		}
 
-	case <-time.After(5 * time.Second):
+	case <-time.After(cfg.DialTimeout):
 		b.logger.Error("Handshake timeout",
 			zap.Duration("elapsed", time.Since(startTime)))
 		return nil, NewBridgeError("dial", "handshake timeout", nil)

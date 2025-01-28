@@ -70,30 +70,7 @@ func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger, cleanUpInterva
 		cancel:                  cancel,
 	}
 
-	// Check if any hook implements SessionStore
-	if bridge.hooks != nil {
-		for _, hook := range bridge.hooks.Hooks {
-			if store, ok := hook.(ISessionStore); ok {
-				sm.store = store
-				sm.logger.Debug("Found hook implementing SessionStore",
-					zap.String("hookID", hook.ID()))
-				// Load sessions from storage
-				if err := sm.loadSessions(); err != nil {
-					logger.Error("Failed to load sessions from storage",
-						zap.Error(err))
-				}
-				break
-			}
-		}
-	}
-
-	if sm.store == nil {
-		logger.Debug("No hook implementing SessionStore found, starting with empty session state")
-	}
-
-	// Start cleanup task
 	sm.startCleanupTask(cleanUpInterval, defaultSessionTimeout)
-
 	return sm
 }
 
@@ -700,11 +677,14 @@ func (sm *SessionManager) UpdateStore(store ISessionStore) error {
 
 		// Update or add the session
 		sm.sessions[id] = storedSession
-		sm.logger.Info("Loaded/Updated session from storage",
+		sm.logger.Debug("Loaded/Updated session from storage",
 			zap.String("sessionID", id),
 			zap.String("state", storedSession.State.String()),
 			zap.String("clientID", storedSession.ClientID))
 	}
+
+	sm.logger.Info("Loaded/Updated sessions from storage",
+		zap.Int("count", len(sm.sessions)))
 
 	return nil
 }

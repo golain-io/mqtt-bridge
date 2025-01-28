@@ -15,6 +15,7 @@ import (
 
 // SQLiteHook implements BridgeHook interface to provide session persistence
 type SQLiteHook struct {
+	bridge.BridgeHookBase
 	logger    *zap.Logger
 	isRunning atomic.Bool
 	id        string
@@ -32,11 +33,6 @@ func NewSQLiteHook(logger *zap.Logger) *SQLiteHook {
 		logger: logger,
 		id:     "sqlite_hook",
 	}
-}
-
-// OnMessageReceived processes session-related messages
-func (h *SQLiteHook) OnMessageReceived(msg []byte) []byte {
-	return msg
 }
 
 // OnSessionCreated handles new session creation
@@ -163,8 +159,7 @@ func (h *SQLiteHook) OnSessionDisconnected(session *bridge.SessionInfo) error {
 
 // Provides indicates whether this hook provides the specified functionality
 func (h *SQLiteHook) Provides(b byte) bool {
-	return b == bridge.OnMessageReceived ||
-		b == bridge.OnSessionCreated ||
+	return b == bridge.OnSessionCreated ||
 		b == bridge.OnSessionResumed ||
 		b == bridge.OnSessionSuspended ||
 		b == bridge.OnSessionDisconnected
