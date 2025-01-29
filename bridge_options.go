@@ -1,6 +1,8 @@
 package bridge
 
 import (
+	"time"
+
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"go.uber.org/zap"
 )
@@ -10,15 +12,23 @@ type BridgeOption func(*BridgeConfig)
 
 // BridgeConfig holds bridge-specific configuration
 type BridgeConfig struct {
-	rootTopic  string
-	qos        byte
-	logger     *zap.Logger
-	mqttClient mqtt.Client
+	rootTopic       string
+	qos             byte
+	logger          *zap.Logger
+	mqttClient      mqtt.Client
+	rateLimit       float64
+	rateBurst       int
+	maxConns        int
+	cleanUpInterval time.Duration
 }
 
 const (
-	defaultRootTopic = "golain"
-	defaultQoS       = byte(1)
+	defaultRootTopic       = "golain"
+	defaultQoS             = byte(1)
+	defaultRateLimit       = 100  // Default operations per second
+	defaultRateBurst       = 200  // Default burst size
+	defaultConnLimit       = 1000 // Default maximum concurrent connections
+	defaultCleanUpInterval = 30 * time.Minute
 )
 
 // WithMQTTClient sets the MQTT client for the bridge
@@ -42,10 +52,37 @@ func WithRootTopic(topic string) BridgeOption {
 	}
 }
 
+func WithCleanUpInterval(interval time.Duration) BridgeOption {
+	return func(cfg *BridgeConfig) {
+		cfg.cleanUpInterval = interval
+	}
+}
+
 // WithQoS sets the MQTT QoS level for the bridge
 func WithQoS(qos byte) BridgeOption {
 	return func(cfg *BridgeConfig) {
 		cfg.qos = qos
+	}
+}
+
+// WithRateLimit sets the rate limit for operations
+func WithRateLimit(ops float64) BridgeOption {
+	return func(cfg *BridgeConfig) {
+		cfg.rateLimit = ops
+	}
+}
+
+// WithRateBurst sets the burst size for rate limiting
+func WithRateBurst(burst int) BridgeOption {
+	return func(cfg *BridgeConfig) {
+		cfg.rateBurst = burst
+	}
+}
+
+// WithMaxConnections sets the maximum number of concurrent connections
+func WithMaxConnections(max int) BridgeOption {
+	return func(cfg *BridgeConfig) {
+		cfg.maxConns = max
 	}
 }
 
@@ -77,8 +114,10 @@ type SessionOption func(*SessionConfig)
 
 // SessionConfig holds session-specific configuration
 type SessionConfig struct {
-	SessionID string
-	State     BridgeSessionState
+	SessionID   string
+	State       BridgeSessionState
+	Timeout     time.Duration
+	DialTimeout time.Duration
 }
 
 // WithSessionID sets a specific session ID for connection
@@ -92,5 +131,17 @@ func WithSessionID(sessionID string) SessionOption {
 func WithSessionState(state BridgeSessionState) SessionOption {
 	return func(cfg *SessionConfig) {
 		cfg.State = state
+	}
+}
+
+func WithDialTimeout(timeout time.Duration) SessionOption {
+	return func(cfg *SessionConfig) {
+		cfg.DialTimeout = timeout
+	}
+}
+
+func WithSessionTimeout(timeout time.Duration) SessionOption {
+	return func(cfg *SessionConfig) {
+		cfg.Timeout = timeout
 	}
 }
