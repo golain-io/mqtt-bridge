@@ -50,7 +50,7 @@ func setupTestSessionManager(t *testing.T) (*testBridges, func()) {
 		WithRootTopic(rootTopic),
 		WithLogger(logger),
 		WithQoS(1),
-		WithCleanUpInterval(20*time.Second),
+		WithCleanUpInterval(3*time.Second),
 	)
 
 	// Create client bridge
@@ -58,6 +58,7 @@ func setupTestSessionManager(t *testing.T) (*testBridges, func()) {
 		WithRootTopic(rootTopic),
 		WithLogger(logger),
 		WithQoS(1),
+		WithCleanUpInterval(3*time.Second),
 	)
 
 	// Small delay to ensure subscriptions are established
@@ -169,12 +170,12 @@ func TestSessionLifecycle(t *testing.T) {
 		defer cleanup()
 		// Establish connection
 		ctx := context.Background()
-		conn, err := bridges.clientBridge.Dial(ctx, "session-test-server", WithSessionTimeout(1*time.Second))
+		conn, err := bridges.clientBridge.Dial(ctx, "session-test-server", WithSessionTimeout(2*time.Second))
 		assert.NoError(t, err)
 		sessionID := conn.(*MQTTNetBridgeConn).sessionID
 
 		// wait for session to be cleaned up
-		time.Sleep(3 * time.Second)
+		time.Sleep(4 * time.Second)
 
 		// Verify session is cleaned up
 		_, exists := bridges.serverBridge.sessionManager.GetSession(sessionID)
