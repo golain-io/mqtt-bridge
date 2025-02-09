@@ -20,6 +20,7 @@ type SQLiteHook struct {
 	isRunning atomic.Bool
 	id        string
 	db        *sql.DB
+	dbPath    string
 }
 
 // SQLiteConfig holds configuration for SQLite hook
@@ -33,6 +34,10 @@ func NewSQLiteHook(logger *zap.Logger) *SQLiteHook {
 		logger: logger,
 		id:     "sqlite_hook",
 	}
+}
+
+func (h *SQLiteHook) GetDBPath() string {
+	return h.dbPath
 }
 
 // OnSessionCreated handles new session creation
@@ -195,6 +200,7 @@ func (h *SQLiteHook) Init(config any) error {
 	}
 
 	h.db = db
+	h.dbPath = cfg.DBPath
 	h.isRunning.Store(true)
 	return nil
 }

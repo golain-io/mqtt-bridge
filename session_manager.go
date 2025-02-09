@@ -24,6 +24,7 @@ type SessionInfo struct {
 
 // ISessionStore defines the interface for session storage providers
 type ISessionStore interface {
+	GetDBPath() string
 	GetStoredSessions() (map[string]*SessionInfo, error)
 }
 

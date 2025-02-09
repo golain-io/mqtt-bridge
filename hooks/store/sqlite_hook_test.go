@@ -101,6 +101,9 @@ func TestSQLiteHook(t *testing.T) {
 			Metadata:   make(map[string]string),
 		}
 
+		dbPath = hook.GetDBPath()
+		require.Equal(t, dbPath, hook.dbPath)
+
 		// Test session creation
 		err := hook.OnSessionCreated(session1)
 		require.NoError(t, err)
