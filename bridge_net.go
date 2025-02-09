@@ -18,14 +18,14 @@ import (
 
 // MQTTNetBridge implements net.Listener over MQTT
 type MQTTNetBridge struct {
-	mqttClient     mqtt.Client
-	logger         *zap.Logger
-	bridgeID       string // Our "listening address"
-	clientID       string // The client ID of the bridge
-	rootTopic      string
-	rootTopicParts []string
-	qos            byte
-
+	mqttClient      mqtt.Client
+	logger          *zap.Logger
+	bridgeID        string // Our "listening address"
+	clientID        string // The client ID of the bridge
+	rootTopic       string
+	rootTopicParts  []string
+	qos             byte
+	cleanUpInterval time.Duration
 	// Session management
 	sessionManager *SessionManager
 
@@ -115,10 +115,11 @@ func (b *MQTTNetBridge) Build(target resolver.Target, cc resolver.ClientConn, op
 func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...BridgeOption) *MQTTNetBridge {
 	// Apply options
 	cfg := &BridgeConfig{
-		rootTopic:  defaultRootTopic,
-		qos:        defaultQoS,
-		logger:     zap.NewNop(),
-		mqttClient: mqttClient,
+		rootTopic:       defaultRootTopic,
+		qos:             defaultQoS,
+		logger:          zap.NewNop(),
+		mqttClient:      mqttClient,
+		cleanUpInterval: defaultCleanUpInterval,
 	}
 	for _, opt := range opts {
 		opt(cfg)
@@ -1030,8 +1031,8 @@ func (b *MQTTNetBridge) AddHook(hook BridgeHook, config any) error {
 }
 
 // CleanupStaleSessions removes sessions that have been suspended longer than the timeout
-func (b *MQTTNetBridge) CleanupStaleSessions(timeout time.Duration) {
-	b.sessionManager.CleanupStaleSessions(timeout)
+func (b *MQTTNetBridge) CleanupStaleSessions() {
+	b.sessionManager.CleanupStaleSessions()
 }
 
 // DisconnectSession disconnects an active session and cleans it up
@@ -1050,28 +1051,6 @@ func (b *MQTTNetBridge) DisconnectSession(sessionID string) error {
 	}
 
 	return b.sessionManager.DisconnectSession(sessionID)
-}
-
-// startSessionCleanupTimer starts a timer to clean up a suspended session
-func (b *MQTTNetBridge) startSessionCleanupTimer(sessionID string) {
-	b.logger.Debug("Starting cleanup timer",
-		zap.String("sessionID", sessionID),
-		zap.Duration("timeout", defaultDisconnectTimeout))
-
-	time.Sleep(defaultDisconnectTimeout)
-
-	session, exists := b.sessionManager.GetSession(sessionID)
-	if !exists {
-		return
-	}
-
-	// Only clean up if still suspended and timeout has elapsed
-	if session.State == BridgeSessionStateSuspended &&
-		time.Since(session.LastSuspended) >= defaultDisconnectTimeout {
-		b.sessionManager.RemoveSession(sessionID)
-		b.logger.Debug("Cleaned up suspended session after timeout",
-			zap.String("sessionID", sessionID))
-	}
 }
 
 // HandleLifecycleMessage processes lifecycle messages for sessions

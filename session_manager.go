@@ -70,7 +70,7 @@ func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger, cleanUpInterva
 		cancel:                  cancel,
 	}
 
-	sm.startCleanupTask(cleanUpInterval, defaultSessionTimeout)
+	sm.startCleanupTask(cleanUpInterval)
 	return sm
 }
 
@@ -289,40 +289,31 @@ func (sm *SessionManager) DisconnectSession(sessionID string) error {
 }
 
 // CleanupStaleSessions removes sessions that have been suspended longer than the timeout
-func (sm *SessionManager) CleanupStaleSessions(defaultTimeout time.Duration) {
-	if defaultTimeout == 0 {
-		defaultTimeout = defaultSessionTimeout
-	}
+func (sm *SessionManager) CleanupStaleSessions() {
 
 	sm.sessionsMu.Lock()
 	defer sm.sessionsMu.Unlock()
 
-	now := time.Now()
 	for id, session := range sm.sessions {
-		// Use session-specific timeout if set, otherwise use default
-		timeout := defaultTimeout
+		timeout := defaultSessionTimeout
 		if session.Timeout > 0 {
 			timeout = session.Timeout
 		}
 
-		if now.Sub(session.LastSuspended) > timeout ||
+		if time.Since(session.LastSuspended) > timeout ||
 			session.State == BridgeSessionStateClosed {
 			delete(sm.sessions, id)
 			sm.logger.Debug("Cleaned up stale session",
 				zap.String("sessionID", id),
 				zap.String("state", session.State.String()),
 				zap.Duration("sessionTimeout", timeout),
-				zap.Duration("age", now.Sub(session.LastSuspended)))
+				zap.Duration("timeSinceSuspended", time.Since(session.LastSuspended)))
 		}
 	}
 }
 
 // startCleanupTask starts a periodic cleanup of stale sessions
-func (sm *SessionManager) startCleanupTask(interval, timeout time.Duration) {
-	if interval == 0 {
-		interval = 5 * time.Minute
-	}
-
+func (sm *SessionManager) startCleanupTask(interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -330,7 +321,7 @@ func (sm *SessionManager) startCleanupTask(interval, timeout time.Duration) {
 		for {
 			select {
 			case <-ticker.C:
-				sm.CleanupStaleSessions(timeout)
+				sm.CleanupStaleSessions()
 			case <-sm.ctx.Done():
 				return
 			}
@@ -438,28 +429,6 @@ func (sm *SessionManager) HandleDisconnect(clientID, sessionID string) error {
 	return nil
 }
 
-// startSessionCleanupTimer starts a timer to clean up a suspended session
-func (sm *SessionManager) startSessionCleanupTimer(sessionID string) {
-	sm.logger.Debug("Starting cleanup timer",
-		zap.String("sessionID", sessionID),
-		zap.Duration("timeout", defaultDisconnectTimeout))
-
-	time.Sleep(defaultDisconnectTimeout)
-
-	session, exists := sm.GetSession(sessionID)
-	if !exists {
-		return
-	}
-
-	// Only clean up if still suspended and timeout has elapsed
-	if session.State == BridgeSessionStateSuspended &&
-		time.Since(session.LastSuspended) >= defaultDisconnectTimeout {
-		sm.RemoveSession(sessionID)
-		sm.logger.Debug("Cleaned up suspended session after timeout",
-			zap.String("sessionID", sessionID))
-	}
-}
-
 // HandleLifecycleMessage processes lifecycle messages for sessions
 func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 	msgParts := strings.Split(UnsafeString(payload), ":")
@@ -496,26 +465,7 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 				zap.String("sessionID", sessionID))
 		}
 
-		sm.sessionsMu.Lock()
-		if session, exists := sm.sessions[sessionID]; exists {
-			session.State = BridgeSessionStateSuspended
-			session.LastSuspended = time.Now()
-			// Store connection to close after releasing lock
-			conn := session.Connection
-			session.Connection = nil
-			sm.sessionsMu.Unlock()
-
-			// Close connection after releasing lock if it exists
-			if conn != nil {
-				conn.connMu.Lock()
-				conn.closed = true
-				close(conn.readBuf)
-				conn.connMu.Unlock()
-				conn.cancel()
-			}
-		} else {
-			sm.sessionsMu.Unlock()
-		}
+		sm.SuspendSession(sessionID, "")
 
 	case resumeAckMsg:
 		if len(msgParts) < 2 {
@@ -603,13 +553,14 @@ func (sm *SessionManager) HandleConnectionEstablished(sessionID string, conn *MQ
 	} else {
 		// Create new session
 		session = &SessionInfo{
-			ID:         sessionID,
-			State:      BridgeSessionStateActive,
-			LastActive: time.Now(),
-			Connection: conn,
-			Metadata:   make(map[string]string),
-			ClientID:   clientID,
-			Timeout:    timeout,
+			ID:            sessionID,
+			State:         BridgeSessionStateActive,
+			LastActive:    time.Now(),
+			Connection:    conn,
+			Metadata:      make(map[string]string),
+			ClientID:      clientID,
+			Timeout:       timeout,
+			LastSuspended: time.Now(),
 		}
 		sm.sessions[sessionID] = session
 
@@ -677,7 +628,7 @@ func (sm *SessionManager) UpdateStore(store ISessionStore) error {
 
 		// Update or add the session
 		sm.sessions[id] = storedSession
-		sm.logger.Debug("Loaded/Updated session from storage",
+		sm.logger.Info("Loaded/Updated session from storage",
 			zap.String("sessionID", id),
 			zap.String("state", storedSession.State.String()),
 			zap.String("clientID", storedSession.ClientID))
