@@ -227,11 +227,7 @@ func (b *MQTTNetBridge) Accept() (net.Conn, error) {
 				zap.String("network", b.proxyAddr.Network()),
 				zap.String("address", b.proxyAddr.String()))
 
-			go func() {
-				defer conn.Close()
-				defer proxyConn.Close()
-				b.proxyConn(proxyConn, conn)
-			}()
+			go b.proxyConn(proxyConn, conn)
 
 			return conn, nil
 		}
