@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -867,10 +868,9 @@ func isClosedConnError(err error) bool {
 	if err == nil {
 		return false
 	}
-	str := err.Error()
-	return strings.Contains(str, "use of closed network connection") ||
-		strings.Contains(str, "context canceled") ||
-		strings.Contains(str, "broken pipe")
+	return errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 // handleHandshake processes incoming handshake messages
