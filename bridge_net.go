@@ -37,6 +37,8 @@ type MQTTNetBridge struct {
 	cancel context.CancelFunc
 
 	hooks *BridgeHooks
+
+	proxyAddr net.Addr
 }
 
 // MQTTAddr implements net.Addr for MQTT connections
@@ -47,6 +49,15 @@ type MQTTAddr struct {
 
 func (a *MQTTAddr) Network() string { return a.network }
 func (a *MQTTAddr) String() string  { return a.address }
+
+// ProxyAddr implements net.Addr for proxy connections
+type ProxyAddr struct {
+	network string
+	address string
+}
+
+func (a *ProxyAddr) Network() string { return a.network }
+func (a *ProxyAddr) String() string  { return a.address }
 
 // Update constants for topic patterns
 const (
@@ -138,6 +149,7 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...BridgeOpt
 		ctx:            ctx,
 		cancel:         cancel,
 		hooks:          &BridgeHooks{logger: cfg.logger},
+		proxyAddr:      cfg.proxyAddr,
 	}
 
 	// Initialize session manager
@@ -168,6 +180,18 @@ func (b *MQTTNetBridge) Accept() (net.Conn, error) {
 		b.logger.Info("Accepted new connection",
 			zap.String("sessionID", conn.sessionID),
 			zap.String("remoteAddr", conn.remoteAddr.String()))
+
+		if b.proxyAddr != nil {
+			// Wait for a client to connect to our Unix socket
+			sConn, err := net.Dial(b.proxyAddr.Network(), b.proxyAddr.String())
+			if err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("failed to accept unix connection: %v", err)
+			}
+
+			go b.proxyConn(sConn, conn)
+		}
+
 		return conn, nil
 	case <-b.ctx.Done():
 		return nil, b.ctx.Err()
@@ -735,30 +759,6 @@ func (b *MQTTNetBridge) ListenOnUnixSocket(path string, addr string) error {
 		}
 		b.proxyConn(conn, bConn)
 	}
-}
-
-func (b *MQTTNetBridge) WriteOnUnixSocket(path string, addr string) (net.Conn, error) {
-
-	bConn, err := b.Accept()
-	if err != nil {
-		return nil, err
-	}
-
-	// Remove existing socket file if it exists
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to remove existing socket: %v", err)
-	}
-
-	// Wait for a client to connect to our Unix socket
-	conn, err := net.Dial(path, addr)
-	if err != nil {
-		bConn.Close()
-		return nil, fmt.Errorf("failed to accept unix connection: %v", err)
-	}
-
-	go b.proxyConn(conn, bConn)
-
-	return bConn, nil
 }
 
 func (b *MQTTNetBridge) proxyConn(conn net.Conn, bConn net.Conn) {
