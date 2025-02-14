@@ -738,25 +738,19 @@ func (b *MQTTNetBridge) ListenOnUnixSocket(path string, addr string) error {
 }
 
 func (b *MQTTNetBridge) WriteOnUnixSocket(path string, addr string) (net.Conn, error) {
-	// Remove existing socket file if it exists
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to remove existing socket: %v", err)
-	}
-
-	// Create the Unix socket
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create unix socket: %v", err)
-	}
-	defer listener.Close()
 
 	bConn, err := b.Accept()
 	if err != nil {
 		return nil, err
 	}
 
+	// Remove existing socket file if it exists
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to remove existing socket: %v", err)
+	}
+
 	// Wait for a client to connect to our Unix socket
-	conn, err := listener.Accept()
+	conn, err := net.Dial(path, addr)
 	if err != nil {
 		bConn.Close()
 		return nil, fmt.Errorf("failed to accept unix connection: %v", err)

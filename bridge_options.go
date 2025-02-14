@@ -20,6 +20,7 @@ type BridgeConfig struct {
 	rateBurst       int
 	maxConns        int
 	cleanUpInterval time.Duration
+	unixSocketPath  string
 }
 
 const (
@@ -83,6 +84,12 @@ func WithRateBurst(burst int) BridgeOption {
 func WithMaxConnections(max int) BridgeOption {
 	return func(cfg *BridgeConfig) {
 		cfg.maxConns = max
+	}
+}
+
+func WithUnixSocketPath(path string) BridgeOption {
+	return func(cfg *BridgeConfig) {
+		cfg.unixSocketPath = path
 	}
 }
 
