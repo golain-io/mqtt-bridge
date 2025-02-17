@@ -2,12 +2,14 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -37,6 +39,12 @@ type MQTTNetBridge struct {
 	cancel context.CancelFunc
 
 	hooks *BridgeHooks
+
+	proxyAddr net.Addr
+
+	// Add mutex and closed flag for safe shutdown
+	closeMu sync.Mutex
+	closed  bool
 }
 
 // MQTTAddr implements net.Addr for MQTT connections
@@ -47,6 +55,15 @@ type MQTTAddr struct {
 
 func (a *MQTTAddr) Network() string { return a.network }
 func (a *MQTTAddr) String() string  { return a.address }
+
+// ProxyAddr implements net.Addr for proxy connections
+type ProxyAddr struct {
+	network string
+	address string
+}
+
+func (a *ProxyAddr) Network() string { return a.network }
+func (a *ProxyAddr) String() string  { return a.address }
 
 // Update constants for topic patterns
 const (
@@ -139,6 +156,7 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...BridgeOpt
 		ctx:            ctx,
 		cancel:         cancel,
 		hooks:          &BridgeHooks{logger: cfg.logger},
+		proxyAddr:      cfg.proxyAddr,
 	}
 
 	// Initialize session manager
@@ -159,6 +177,13 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...BridgeOpt
 
 // Accept implements net.Listener.Accept
 func (b *MQTTNetBridge) Accept() (net.Conn, error) {
+	b.closeMu.Lock()
+	if b.closed {
+		b.closeMu.Unlock()
+		return nil, fmt.Errorf("listener closed")
+	}
+	b.closeMu.Unlock()
+
 	b.logger.Debug("Waiting to accept new connection")
 	select {
 	case conn, ok := <-b.acceptCh:
@@ -169,6 +194,46 @@ func (b *MQTTNetBridge) Accept() (net.Conn, error) {
 		b.logger.Info("Accepted new connection",
 			zap.String("sessionID", conn.sessionID),
 			zap.String("remoteAddr", conn.remoteAddr.String()))
+
+		if b.proxyAddr != nil {
+			// Try to connect to the proxy target with retries
+			var proxyConn net.Conn
+			var err error
+			for retries := 3; retries > 0; retries-- {
+				// Check if socket file exists before attempting connection
+				if _, err := os.Stat(b.proxyAddr.String()); err != nil {
+					b.logger.Debug("Socket file not found, retrying",
+						zap.String("address", b.proxyAddr.String()),
+						zap.Int("retries_left", retries-1),
+						zap.Error(err))
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+
+				proxyConn, err = net.Dial(b.proxyAddr.Network(), b.proxyAddr.String())
+				if err == nil {
+					break
+				}
+				b.logger.Debug("Failed to connect to proxy target, retrying",
+					zap.String("address", b.proxyAddr.String()),
+					zap.Int("retries_left", retries-1),
+					zap.Error(err))
+				time.Sleep(100 * time.Millisecond)
+			}
+			if err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("failed to connect to proxy target after retries: %v", err)
+			}
+
+			b.logger.Debug("Connected to proxy target",
+				zap.String("network", b.proxyAddr.Network()),
+				zap.String("address", b.proxyAddr.String()))
+
+			go b.proxyConn(proxyConn, conn)
+
+			return conn, nil
+		}
+
 		return conn, nil
 	case <-b.ctx.Done():
 		return nil, b.ctx.Err()
@@ -177,6 +242,14 @@ func (b *MQTTNetBridge) Accept() (net.Conn, error) {
 
 // Close implements net.Listener.Close
 func (b *MQTTNetBridge) Close() error {
+	b.closeMu.Lock()
+	if b.closed {
+		b.closeMu.Unlock()
+		return nil
+	}
+	b.closed = true
+	b.closeMu.Unlock()
+
 	b.logger.Info("Closing MQTT bridge", zap.String("bridgeID", b.bridgeID))
 	b.cancel() // Cancel the context
 
@@ -250,6 +323,9 @@ type MQTTNetBridgeConn struct {
 		payload []byte
 		topic   string
 	}
+
+	reader io.Reader
+	writer io.Writer
 }
 
 func (c *MQTTNetBridgeConn) SessionID() string {
@@ -738,71 +814,64 @@ func (b *MQTTNetBridge) ListenOnUnixSocket(path string, addr string) error {
 	}
 }
 
-func (b *MQTTNetBridge) WriteOnUnixSocket(path string, addr string) (net.Conn, error) {
-	// Remove existing socket file if it exists
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("failed to remove existing socket: %v", err)
+func (b *MQTTNetBridge) proxyConn(conn net.Conn, bConn net.Conn) {
+	errChan := make(chan error, 2)
+	done := make(chan struct{})
+
+	// Copy from client to bridge
+	go func() {
+		_, err := io.Copy(bConn, conn)
+		if err != nil && err != io.EOF && !isClosedConnError(err) {
+			b.logger.Error("Error copying data from client to bridge", zap.Error(err))
+		}
+		errChan <- err
+	}()
+
+	// Copy from bridge to client
+	go func() {
+		_, err := io.Copy(conn, bConn)
+		if err != nil && err != io.EOF && !isClosedConnError(err) {
+			b.logger.Error("Error copying data from bridge to client", zap.Error(err))
+		}
+		errChan <- err
+	}()
+
+	// Wait for either copy operation to finish
+	go func() {
+		var proxyErr error
+		for i := 0; i < 2; i++ {
+			if err := <-errChan; err != nil && err != io.EOF && !isClosedConnError(err) {
+				proxyErr = errors.Join(proxyErr, err)
+			}
+		}
+		if proxyErr != nil {
+			b.logger.Error("Proxy connection error",
+				zap.Error(proxyErr))
+		}
+		close(done)
+	}()
+
+	// Wait for completion or context cancellation
+	select {
+	case <-done:
+		b.logger.Debug("Proxy connection completed")
+	case <-b.ctx.Done():
+		b.logger.Debug("Proxy connection cancelled")
 	}
 
-	// Create the Unix socket
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create unix socket: %v", err)
-	}
-	defer listener.Close()
-
-	bConn, err := b.Accept()
-	if err != nil {
-		return nil, err
-	}
-
-	// Wait for a client to connect to our Unix socket
-	conn, err := listener.Accept()
-	if err != nil {
-		bConn.Close()
-		return nil, fmt.Errorf("failed to accept unix connection: %v", err)
-	}
-
-	go b.proxyConn(conn, bConn)
-
-	return bConn, nil
+	// Ensure both connections are closed
+	conn.Close()
+	bConn.Close()
 }
 
-func (b *MQTTNetBridge) proxyConn(conn net.Conn, bConn net.Conn) {
-	go func() {
-		for {
-			if bConn == nil || conn == nil {
-				break
-			}
-			_, err := io.Copy(bConn, conn)
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				b.logger.Error("Error copying data from client to bridge", zap.Error(err))
-				bConn.Close()
-				conn.Close()
-				break
-			}
-		}
-	}()
-	go func() {
-		for {
-			if bConn == nil || conn == nil {
-				break
-			}
-			_, err := io.Copy(conn, bConn)
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				b.logger.Error("Error copying data from bridge to client", zap.Error(err))
-				bConn.Close()
-				conn.Close()
-				break
-			}
-		}
-	}()
+// isClosedConnError returns true if the error is related to using a closed connection
+func isClosedConnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 // handleHandshake processes incoming handshake messages

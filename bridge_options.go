@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"net"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -20,6 +21,7 @@ type BridgeConfig struct {
 	rateBurst       int
 	maxConns        int
 	cleanUpInterval time.Duration
+	proxyAddr       net.Addr
 }
 
 const (
@@ -83,6 +85,15 @@ func WithRateBurst(burst int) BridgeOption {
 func WithMaxConnections(max int) BridgeOption {
 	return func(cfg *BridgeConfig) {
 		cfg.maxConns = max
+	}
+}
+
+func WithProxyAddr(network, addr string) BridgeOption {
+	return func(cfg *BridgeConfig) {
+		cfg.proxyAddr = &ProxyAddr{
+			network: network,
+			address: addr,
+		}
 	}
 }
 

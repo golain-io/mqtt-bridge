@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -295,4 +297,221 @@ func TestMQTTBridgeUnsubscribe(t *testing.T) {
 
 	// Close server connection
 	conn.Close()
+}
+
+func TestMQTTBridgeProxy(t *testing.T) {
+	// Setup logger
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+
+	// Create a temporary Unix socket path with unique name
+	sockPath := fmt.Sprintf("/tmp/test-proxy.sock")
+
+	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+		logger.Error("Failed to clean up existing socket", zap.String("address", sockPath), zap.Error(err))
+	}
+
+	// Ensure socket file is cleaned up after test
+	defer os.Remove(sockPath)
+
+	// Create a backend TCP server that will be proxied
+	backendServer, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Failed to create backend server: %v", err)
+	}
+	defer backendServer.Close()
+
+	// Channel to signal backend server is ready
+	backendReady := make(chan struct{})
+
+	// Start backend server
+	backendDone := make(chan struct{})
+	go func() {
+		defer close(backendDone)
+		// Signal that we're ready to accept connections
+		close(backendReady)
+
+		for {
+			conn, err := backendServer.Accept()
+			if err != nil {
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					t.Errorf("Backend accept error: %v", err)
+				}
+				return
+			}
+
+			t.Log("Backend server accepted connection")
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 1024)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
+							t.Logf("Backend read error: %v", err)
+						}
+						return
+					}
+
+					t.Logf("Backend received: %s", string(buf[:n]))
+
+					// Echo the received data back
+					_, err = c.Write(buf[:n])
+					if err != nil {
+						if !strings.Contains(err.Error(), "use of closed network connection") {
+							t.Logf("Backend write error: %v", err)
+						}
+						return
+					}
+					t.Logf("Backend echoed: %s", string(buf[:n]))
+				}
+			}(conn)
+		}
+	}()
+
+	// Wait for backend server to be ready
+	select {
+	case <-backendReady:
+		t.Log("Backend server ready")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for backend server to be ready")
+	}
+
+	// Create MQTT clients
+	serverClient := mqtt.NewClient(mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-server-proxy"))
+
+	if token := serverClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect server to MQTT: %v", token.Error())
+	}
+	defer serverClient.Disconnect(250)
+
+	// Create bridge listener with proxy configuration
+	serverBridgeID := "test-server-proxy"
+	rootTopic := "/vedant/proxy"
+	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+		WithQoS(2),
+		WithCleanUpInterval(50*time.Second),
+		WithProxyAddr("unix", sockPath),
+	)
+	defer listener.Close()
+
+	// Start accepting connections in the background
+	acceptDone := make(chan struct{})
+	acceptErr := make(chan error, 1)
+	go func() {
+		defer close(acceptDone)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				if !strings.Contains(err.Error(), "listener closed") &&
+					!strings.Contains(err.Error(), "context canceled") {
+					acceptErr <- err
+					t.Errorf("Accept error: %v", err)
+				}
+				return
+			}
+			t.Log("Bridge accepted connection")
+			// Keep the connection open until the test finishes
+			defer conn.Close()
+		}
+	}()
+
+	// Create client MQTT client
+	clientClient := mqtt.NewClient(mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-client-proxy"))
+
+	if token := clientClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect client to MQTT: %v", token.Error())
+	}
+	defer clientClient.Disconnect(250)
+
+	// Create client bridge
+	clientBridgeID := "test-client-proxy"
+	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger))
+	defer clientBridge.Close()
+
+	// Connect client to server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Add small delay to ensure server is ready
+	time.Sleep(100 * time.Millisecond)
+
+	clientConn, err := clientBridge.Dial(ctx, serverBridgeID, WithSessionTimeout(30*time.Second))
+	if err != nil {
+		t.Fatalf("Failed to connect to server: %v", err)
+	}
+	defer clientConn.Close()
+
+	// Test proxy functionality with multiple messages
+	testCases := []string{
+		"Hello through proxy!",
+		"Testing proxy 1,2,3",
+		"Special proxy chars: !@#$%^&*()",
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("Proxy_%s", tc), func(t *testing.T) {
+			// Write test message
+			t.Logf("Writing message: %s", tc)
+			_, err := clientConn.Write([]byte(tc))
+			assert.NoError(t, err)
+
+			// Read response with retry
+			buf := make([]byte, 1024)
+			var n int
+			for retries := 3; retries > 0; retries-- {
+				n, err = clientConn.Read(buf)
+				if err == nil {
+					break
+				}
+				t.Logf("Read attempt failed (retries left: %d): %v", retries-1, err)
+				time.Sleep(100 * time.Millisecond)
+			}
+			assert.NoError(t, err)
+			response := string(buf[:n])
+			t.Logf("Received response: %s", response)
+			assert.Equal(t, tc, response)
+		})
+
+		// Add delay between test cases
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Clean up in reverse order
+	clientConn.Close()
+	clientBridge.Close()
+	listener.Close()
+	backendServer.Close()
+
+	// Wait for backend server to finish
+	select {
+	case <-backendDone:
+		t.Log("Backend server closed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for backend server to close")
+	}
+
+	// Wait for accept goroutine to finish
+	select {
+	case <-acceptDone:
+		t.Log("Accept loop closed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for accept loop to close")
+	}
+
+	// Check if there were any unexpected accept errors
+	select {
+	case err := <-acceptErr:
+		t.Errorf("Unexpected accept error: %v", err)
+	default:
+		// No errors, test passed
+	}
 }
