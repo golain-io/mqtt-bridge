@@ -623,6 +623,9 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 			upTopic := ackMatches[2]
 			downTopic := ackMatches[3]
 
+			b.logger.Debug("upTopic", zap.String("upTopic", upTopic))
+			b.logger.Debug("downTopic", zap.String("downTopic", downTopic))
+
 			// Create client connection
 			connCtx, cancel := context.WithCancel(b.ctx)
 			conn := &MQTTNetBridgeConn{

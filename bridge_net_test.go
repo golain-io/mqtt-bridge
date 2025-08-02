@@ -17,7 +17,7 @@ import (
 
 func TestMQTTBridgeEchoServer(t *testing.T) {
 	// Setup logger
-	logger, _ := zap.NewDevelopment()
+	logger, _ := zap.NewProduction()
 	defer logger.Sync()
 
 	// MQTT client options for server
@@ -34,7 +34,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 
 	// Create bridge listener
 	serverBridgeID := "test-server"
-	rootTopic := "/vedant"
+	rootTopic := "/8d94_b0aa/CC:47:40:05:A6:B7"
 	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
 		WithRootTopic(rootTopic),
 		WithLogger(logger),
@@ -75,9 +75,11 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 	}
 	defer clientClient.Disconnect(250)
 
+	clientLogger, _ := zap.NewDevelopment()
+
 	// Create client bridge
 	clientBridgeID := "test-client"
-	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID, WithRootTopic(rootTopic))
+	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID, WithRootTopic(rootTopic), WithLogger(clientLogger))
 	defer clientBridge.Close()
 
 	// Connect to the server
