@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -16,6 +17,11 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/resolver"
+)
+
+var (
+	msgTypeRegex = regexp.MustCompile(`^([^:]+):(.+)$`)
+	ackRegex     = regexp.MustCompile(`^([\w-]+):([\d\D]+?up):([\d\D]+?down)$`)
 )
 
 // MQTTNetBridge implements net.Listener over MQTT
@@ -331,19 +337,6 @@ func (c *MQTTNetBridgeConn) SessionID() string {
 	return c.sessionID
 }
 
-// handleLifecycleHandshake handles lifecycle messages for client connections
-func (c *MQTTNetBridgeConn) handleLifecycleHandshake() {
-	for {
-		select {
-		case resp := <-c.respChan:
-			c.bridge.sessionManager.HandleLifecycleMessage(resp.payload, resp.topic)
-		case <-c.ctx.Done():
-			return
-		}
-	}
-}
-
-// Implement net.Conn interface stubs (we'll flesh these out next)
 func (c *MQTTNetBridgeConn) Read(b []byte) (n int, err error) {
 	c.connMu.RLock()
 	if !c.connected {
@@ -606,20 +599,29 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 	// Wait for response
 	select {
 	case resp := <-respChan:
-		payload := b.hooks.OnMessageReceived(resp.payload)
 
-		msgParts := strings.Split(UnsafeString(payload), ":")
-		msgType := msgParts[0]
+		payload := b.hooks.OnMessageReceived(resp.payload)
+		matches := msgTypeRegex.FindStringSubmatch(UnsafeString(payload))
+		if len(matches) != 3 {
+			return nil, NewBridgeError("dial", "invalid message format", nil)
+		}
+
+		msgType := matches[1]
+		msg := matches[2]
 
 		switch msgType {
 		case connectAckMsg, resumeAckMsg:
-			if len(msgParts) < 4 {
+			// Parse remaining content for acknowledgment messages using regex
+			// Format: sessionID:upTopic:downTopic
+			ackMatches := ackRegex.FindStringSubmatch(msg)
+
+			if len(ackMatches) != 4 {
 				return nil, NewBridgeError("dial", "invalid acknowledgment format", nil)
 			}
 
-			sessionID = msgParts[1]
-			upTopic := msgParts[2]
-			downTopic := msgParts[3]
+			sessionID = ackMatches[1]
+			upTopic := ackMatches[2]
+			downTopic := ackMatches[3]
 
 			// Create client connection
 			connCtx, cancel := context.WithCancel(b.ctx)
@@ -677,10 +679,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 			return conn, nil
 
 		case errorMsg:
-			if len(msgParts) < 2 {
-				return nil, NewBridgeError("dial", "invalid error message format", nil)
-			}
-			errorType := msgParts[1]
+			errorType := msg
 			return nil, b.sessionManager.HandleSessionError(sessionID, errorType)
 
 		default:
