@@ -177,20 +177,22 @@ func (sm *SessionManager) CreateSession(sessionID, clientID string, timeout time
 // SuspendSession suspends an active session
 func (sm *SessionManager) SuspendSession(sessionID string, clientID string) error {
 	sm.sessionsMu.Lock()
-	defer sm.sessionsMu.Unlock()
 
 	session, exists := sm.sessions[sessionID]
 	if !exists {
+		sm.sessionsMu.Unlock()
 		return NewSessionNotFoundError(sessionID)
 	}
 
 	// Verify client owns this session
 	if session.ClientID != clientID {
+		sm.sessionsMu.Unlock()
 		return NewUnauthorizedError(sessionID)
 	}
 
 	// Only suspend active sessions
 	if session.State != BridgeSessionStateActive {
+		sm.sessionsMu.Unlock()
 		return NewInvalidStateError(sessionID)
 	}
 
@@ -202,6 +204,7 @@ func (sm *SessionManager) SuspendSession(sessionID string, clientID string) erro
 	session.LastSuspended = time.Now()
 	session.Connection = nil
 	sm.sessions[sessionID] = session
+	sm.sessionsMu.Unlock()
 
 	// Call hooks after updating state
 	if sm.bridge.hooks != nil {
