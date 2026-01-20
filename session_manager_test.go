@@ -475,3 +475,110 @@ func echoHandler(t *testing.T, conn net.Conn) {
 		}
 	}
 }
+
+// TestBridgeCloseDeadlock tests that bridge.Close() does not deadlock when
+// closing connections that may be blocked on Read(). This is a regression test
+// for the deadlock in SuspendSession where it held sessionsMu.Lock() while
+// calling conn.Close(), which then tried to acquire sessionsMu.RLock() via GetSession().
+func TestBridgeCloseDeadlock(t *testing.T) {
+	// Setup logger
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+
+	rootTopic := "/test"
+
+	// Create server MQTT client
+	serverOpts := mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("deadlock-test-server")
+
+	serverClient := mqtt.NewClient(serverOpts)
+	if token := serverClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect server to MQTT: %v", token.Error())
+	}
+	defer serverClient.Disconnect(250)
+
+	// Create client MQTT client
+	clientOpts := mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("deadlock-test-client")
+
+	clientClient := mqtt.NewClient(clientOpts)
+	if token := clientClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect client to MQTT: %v", token.Error())
+	}
+	defer clientClient.Disconnect(250)
+
+	// Create server bridge
+	serverBridge := NewMQTTNetBridge(serverClient, "deadlock-test-server",
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+		WithQoS(1),
+	)
+
+	// Create client bridge
+	clientBridge := NewMQTTNetBridge(clientClient, "deadlock-test-client",
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+		WithQoS(1),
+	)
+
+	// Small delay to ensure subscriptions are established
+	time.Sleep(100 * time.Millisecond)
+
+	// Start server goroutine to accept connections
+	serverConnChan := make(chan net.Conn, 1)
+	go func() {
+		conn, err := serverBridge.Accept()
+		if err != nil {
+			return
+		}
+		serverConnChan <- conn
+		// Block on Read() to simulate a gRPC server waiting for data
+		// This will cause conn.Close() to potentially call GetSession()
+		buf := make([]byte, 1024)
+		conn.Read(buf)
+	}()
+
+	// Establish connection from client
+	ctx := context.Background()
+	clientConn, err := clientBridge.Dial(ctx, "deadlock-test-server")
+	assert.NoError(t, err)
+
+	// Wait for server to accept the connection
+	var serverConn net.Conn
+	select {
+	case serverConn = <-serverConnChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for server to accept connection")
+	}
+
+	// Verify session exists and is active
+	sessionID := clientConn.(*MQTTNetBridgeConn).sessionID
+	session, exists := serverBridge.sessionManager.GetSession(sessionID)
+	assert.True(t, exists)
+	assert.Equal(t, BridgeSessionStateActive, session.State)
+
+	// Close the bridge with a timeout to detect deadlocks
+	// Before the fix, this would deadlock indefinitely
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- serverBridge.Close()
+	}()
+
+	select {
+	case err := <-closeDone:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("bridge.Close() deadlocked - did not complete within 2 seconds")
+	}
+
+	// Cleanup
+	clientBridge.Close()
+	if serverConn != nil {
+		err := serverConn.Close()
+		assert.NoError(t, err)
+	}
+	err = clientConn.Close()
+	assert.NoError(t, err)
+}
