@@ -216,14 +216,8 @@ func (sm *SessionManager) SuspendSession(sessionID string, clientID string) erro
 
 	// Close connection after releasing lock if it exists
 	if conn != nil {
-		// Cancel context and mark as closed
-		conn.cancel()
-		conn.closeMu.Lock()
-		conn.closed = true
-		conn.closeMu.Unlock()
-
-		// Let the connection's Close() method handle channel closing
-		// This avoids the double close issue
+		// Use Close() which handles context cancellation, channel closing, and cleanup
+		// sync.Once ensures idempotency if called multiple times
 		conn.Close()
 	}
 
@@ -507,11 +501,9 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 
 			// Close connection after releasing lock if it exists
 			if conn != nil {
-				conn.connMu.Lock()
-				conn.closed = true
-				close(conn.readBuf)
-				conn.connMu.Unlock()
-				conn.cancel()
+				// Use Close() which handles context cancellation, channel closing, and cleanup
+				// sync.Once ensures idempotency if called multiple times
+				conn.Close()
 			}
 		} else {
 			sm.sessionsMu.Unlock()

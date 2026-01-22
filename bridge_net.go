@@ -302,15 +302,13 @@ type MQTTNetBridgeConn struct {
 	sessionID  string
 
 	// Read buffer management
-	readBuf    chan []byte
-	readBuffer []byte // Holds partially read data
-	readMu     sync.Mutex
-	readErr    error
-	deadline   time.Time
+	readBuf      chan []byte
+	readMu       sync.Mutex
+	deadline     time.Time
+	readBufClose sync.Once // Protects against double-close of readBuf
 
 	// Write management
 	writeMu   sync.Mutex
-	writeErr  error
 	wDeadline time.Time
 
 	// Connection state
@@ -329,9 +327,6 @@ type MQTTNetBridgeConn struct {
 		payload []byte
 		topic   string
 	}
-
-	reader io.Reader
-	writer io.Writer
 }
 
 func (c *MQTTNetBridgeConn) SessionID() string {
@@ -371,6 +366,8 @@ func (c *MQTTNetBridgeConn) Read(b []byte) (n int, err error) {
 		return n, nil
 	case <-timeout:
 		return 0, os.ErrDeadlineExceeded
+	case <-c.ctx.Done():
+		return 0, net.ErrClosed
 	case <-c.bridge.ctx.Done():
 		return 0, c.bridge.ctx.Err()
 	}
@@ -380,8 +377,19 @@ func (c *MQTTNetBridgeConn) Write(b []byte) (n int, err error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	if c.closed {
-		return 0, fmt.Errorf("connection closed")
+	// Check context before proceeding (unblocks immediately if Close() was called)
+	select {
+	case <-c.ctx.Done():
+		return 0, net.ErrClosed
+	default:
+	}
+
+	// Check closed flag with proper synchronization
+	c.closeMu.RLock()
+	closed := c.closed
+	c.closeMu.RUnlock()
+	if closed {
+		return 0, net.ErrClosed
 	}
 
 	// Determine which topic to use based on role
@@ -396,14 +404,50 @@ func (c *MQTTNetBridgeConn) Write(b []byte) (n int, err error) {
 		zap.Int("bytes", len(b)),
 		zap.String("topic", topic))
 
-	if !token.WaitTimeout(5 * time.Second) {
-		return 0, fmt.Errorf("write timeout")
-	}
-	if token.Error() != nil {
-		return 0, token.Error()
-	}
+	// Wait for publish with timeout, but check context periodically
+	done := make(chan struct{})
+	var publishErr error
+	go func() {
+		if !token.WaitTimeout(5 * time.Second) {
+			publishErr = fmt.Errorf("write timeout")
+		} else if token.Error() != nil {
+			publishErr = token.Error()
+		}
+		close(done)
+	}()
 
-	return len(b), nil
+	// Wait for publish to complete, but also check for closure
+	select {
+	case <-c.ctx.Done():
+		return 0, net.ErrClosed
+	case <-done:
+		// Publish completed, but check if connection was closed
+		// This check must happen AFTER publish completes but BEFORE we return
+		c.closeMu.RLock()
+		closed := c.closed
+		c.closeMu.RUnlock()
+		if closed {
+			return 0, net.ErrClosed
+		}
+		// Also check context one more time as a final check
+		select {
+		case <-c.ctx.Done():
+			return 0, net.ErrClosed
+		default:
+			// Context not cancelled, but check closed flag one more time
+			// to handle race condition where Close() is called between checks
+			c.closeMu.RLock()
+			if c.closed {
+				c.closeMu.RUnlock()
+				return 0, net.ErrClosed
+			}
+			c.closeMu.RUnlock()
+		}
+		if publishErr != nil {
+			return 0, publishErr
+		}
+		return len(b), nil
+	}
 }
 
 func (c *MQTTNetBridgeConn) Close() error {
@@ -415,8 +459,15 @@ func (c *MQTTNetBridgeConn) Close() error {
 	c.closed = true
 	c.closeMu.Unlock()
 
-	// Only call DisconnectSession if we're not already being closed by it
-	// and if the session is still active
+	// FIRST: Cancel context to unblock any waiting Read/Write operations
+	c.cancel()
+
+	// SECOND: Close readBuf to signal EOF to readers (idempotent via sync.Once)
+	c.readBufClose.Do(func() {
+		close(c.readBuf)
+	})
+
+	// THEN: Handle session cleanup (non-blocking path)
 	select {
 	case <-c.ctx.Done():
 		// Context already cancelled, we're being closed by DisconnectSession
@@ -434,7 +485,6 @@ func (c *MQTTNetBridgeConn) Close() error {
 		}
 	}
 
-	c.cancel()
 	return nil
 }
 
