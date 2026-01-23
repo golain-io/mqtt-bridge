@@ -307,7 +307,7 @@ func TestMQTTBridgeProxy(t *testing.T) {
 	defer logger.Sync()
 
 	// Create a temporary Unix socket path with unique name
-	sockPath := fmt.Sprintf("/tmp/test-proxy.sock")
+	sockPath := "/tmp/test-proxy.sock"
 
 	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
 		logger.Error("Failed to clean up existing socket", zap.String("address", sockPath), zap.Error(err))
@@ -516,4 +516,347 @@ func TestMQTTBridgeProxy(t *testing.T) {
 	default:
 		// No errors, test passed
 	}
+}
+
+// TestCloseUnblocksRead verifies that a blocked Read() operation unblocks immediately
+// when Close() is called, as required by the net.Conn interface contract.
+func TestCloseUnblocksRead(t *testing.T) {
+	// Setup logger
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+
+	// Create MQTT clients
+	serverClient := mqtt.NewClient(mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-close-read-server"))
+
+	if token := serverClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect server to MQTT: %v", token.Error())
+	}
+	defer serverClient.Disconnect(250)
+
+	// Create bridge listener
+	serverBridgeID := "test-close-read-server"
+	rootTopic := "/vedant/close-read"
+	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+		WithQoS(2),
+	)
+	defer listener.Close()
+
+	// Create client MQTT client
+	clientClient := mqtt.NewClient(mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-close-read-client"))
+
+	if token := clientClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect client to MQTT: %v", token.Error())
+	}
+	defer clientClient.Disconnect(250)
+
+	// Create client bridge
+	clientBridgeID := "test-close-read-client"
+	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger))
+	defer clientBridge.Close()
+
+	// Start server goroutine
+	serverConn := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			t.Errorf("Accept error: %v", err)
+			return
+		}
+		serverConn <- conn
+	}()
+
+	// Connect client to server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	clientConn, err := clientBridge.Dial(ctx, serverBridgeID)
+	if err != nil {
+		t.Fatalf("Failed to connect to server: %v", err)
+	}
+
+	// Wait for server connection
+	var conn net.Conn
+	select {
+	case conn = <-serverConn:
+		t.Log("Server accepted connection")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for server connection")
+	}
+	defer conn.Close()
+
+	// Allow time for subscriptions to be established
+	time.Sleep(500 * time.Millisecond)
+
+	// Start a goroutine that blocks on Read()
+	readDone := make(chan struct{})
+	readErr := make(chan error, 1)
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, 1024)
+		_, err := clientConn.Read(buf)
+		readErr <- err
+	}()
+
+	// Give Read() a moment to block
+	time.Sleep(100 * time.Millisecond)
+
+	// Close the connection - this should unblock the Read()
+	closeStart := time.Now()
+	err = clientConn.Close()
+	assert.NoError(t, err)
+
+	// Wait for Read() to unblock (should happen immediately)
+	select {
+	case err := <-readErr:
+		closeDuration := time.Since(closeStart)
+		// Read should have unblocked within 500ms (much faster than any timeout)
+		assert.Less(t, closeDuration, 500*time.Millisecond,
+			"Read() should unblock immediately after Close()")
+		// Should return net.ErrClosed or io.EOF
+		assert.True(t, err == net.ErrClosed || err == io.EOF,
+			"Read() should return net.ErrClosed or io.EOF, got: %v", err)
+		t.Logf("Read() unblocked after %v with error: %v", closeDuration, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read() did not unblock within 2 seconds after Close()")
+	}
+
+	// Wait for goroutine to finish
+	select {
+	case <-readDone:
+		// Success
+	case <-time.After(1 * time.Second):
+		t.Error("Read goroutine did not finish")
+	}
+}
+
+// TestCloseUnblocksWrite verifies that a blocked Write() operation unblocks immediately
+// when Close() is called, as required by the net.Conn interface contract.
+func TestCloseUnblocksWrite(t *testing.T) {
+	// Setup logger
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+
+	// Create MQTT clients
+	serverClient := mqtt.NewClient(mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-close-write-server"))
+
+	if token := serverClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect server to MQTT: %v", token.Error())
+	}
+	defer serverClient.Disconnect(250)
+
+	// Create bridge listener
+	serverBridgeID := "test-close-write-server"
+	rootTopic := "/vedant/close-write"
+	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+		WithQoS(2),
+	)
+	defer listener.Close()
+
+	// Create client MQTT client
+	clientClient := mqtt.NewClient(mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-close-write-client"))
+
+	if token := clientClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect client to MQTT: %v", token.Error())
+	}
+	defer clientClient.Disconnect(250)
+
+	// Create client bridge
+	clientBridgeID := "test-close-write-client"
+	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger))
+	defer clientBridge.Close()
+
+	// Start server goroutine
+	serverConn := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			t.Errorf("Accept error: %v", err)
+			return
+		}
+		serverConn <- conn
+	}()
+
+	// Connect client to server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	clientConn, err := clientBridge.Dial(ctx, serverBridgeID)
+	if err != nil {
+		t.Fatalf("Failed to connect to server: %v", err)
+	}
+
+	// Wait for server connection
+	var conn net.Conn
+	select {
+	case conn = <-serverConn:
+		t.Log("Server accepted connection")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for server connection")
+	}
+	defer conn.Close()
+
+	// Allow time for subscriptions to be established
+	time.Sleep(500 * time.Millisecond)
+
+	// Start a goroutine that blocks on Write()
+	// We'll write a large message to potentially block
+	writeDone := make(chan struct{})
+	writeErr := make(chan error, 1)
+	go func() {
+		defer close(writeDone)
+		largeData := make([]byte, 10*1024*1024) // 10MB to potentially cause blocking
+		_, err := clientConn.Write(largeData)
+		writeErr <- err
+	}()
+
+	// Give Write() a moment to potentially block
+	time.Sleep(100 * time.Millisecond)
+
+	// Close the connection - this should unblock the Write()
+	closeStart := time.Now()
+	err = clientConn.Close()
+	assert.NoError(t, err)
+
+	// Wait for Write() to unblock (should happen immediately)
+	select {
+	case err := <-writeErr:
+		closeDuration := time.Since(closeStart)
+		// Write should have unblocked within 500ms (much faster than any timeout)
+		assert.Less(t, closeDuration, 500*time.Millisecond,
+			"Write() should unblock immediately after Close()")
+		// Should return net.ErrClosed
+		assert.Equal(t, net.ErrClosed, err,
+			"Write() should return net.ErrClosed, got: %v", err)
+		t.Logf("Write() unblocked after %v with error: %v", closeDuration, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Write() did not unblock within 2 seconds after Close()")
+	}
+
+	// Wait for goroutine to finish
+	select {
+	case <-writeDone:
+		// Success
+	case <-time.After(1 * time.Second):
+		t.Error("Write goroutine did not finish")
+	}
+}
+
+// TestCloseIdempotent verifies that multiple calls to Close() are safe and idempotent.
+func TestCloseIdempotent(t *testing.T) {
+	// Setup logger
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+
+	// Create MQTT clients
+	serverClient := mqtt.NewClient(mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-close-idempotent-server"))
+
+	if token := serverClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect server to MQTT: %v", token.Error())
+	}
+	defer serverClient.Disconnect(250)
+
+	// Create bridge listener
+	serverBridgeID := "test-close-idempotent-server"
+	rootTopic := "/vedant/close-idempotent"
+	listener := NewMQTTNetBridge(serverClient, serverBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger),
+		WithQoS(2),
+	)
+	defer listener.Close()
+
+	// Create client MQTT client
+	clientClient := mqtt.NewClient(mqtt.NewClientOptions().
+		AddBroker("tcp://localhost:1883").
+		SetClientID("bridge-test-close-idempotent-client"))
+
+	if token := clientClient.Connect(); token.Wait() && token.Error() != nil {
+		t.Fatalf("Failed to connect client to MQTT: %v", token.Error())
+	}
+	defer clientClient.Disconnect(250)
+
+	// Create client bridge
+	clientBridgeID := "test-close-idempotent-client"
+	clientBridge := NewMQTTNetBridge(clientClient, clientBridgeID,
+		WithRootTopic(rootTopic),
+		WithLogger(logger))
+	defer clientBridge.Close()
+
+	// Start server goroutine
+	serverConn := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		serverConn <- conn
+	}()
+
+	// Connect client to server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	clientConn, err := clientBridge.Dial(ctx, serverBridgeID)
+	if err != nil {
+		t.Fatalf("Failed to connect to server: %v", err)
+	}
+
+	// Wait for server connection
+	select {
+	case <-serverConn:
+		t.Log("Server accepted connection")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for server connection")
+	}
+
+	// Allow time for subscriptions to be established
+	time.Sleep(500 * time.Millisecond)
+
+	// Call Close() multiple times concurrently
+	closeCount := 10
+	closeErrs := make(chan error, closeCount)
+	for i := 0; i < closeCount; i++ {
+		go func() {
+			closeErrs <- clientConn.Close()
+		}()
+	}
+
+	// Collect all results
+	var errors []error
+	for i := 0; i < closeCount; i++ {
+		select {
+		case err := <-closeErrs:
+			errors = append(errors, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close() did not return within 2 seconds")
+		}
+	}
+
+	// All Close() calls should succeed (return nil)
+	for i, err := range errors {
+		assert.NoError(t, err, "Close() call %d should succeed", i+1)
+	}
+
+	// Verify connection is actually closed
+	_, err = clientConn.Write([]byte("test"))
+	assert.Error(t, err, "Write should fail after Close()")
+	assert.Equal(t, net.ErrClosed, err, "Write should return net.ErrClosed")
 }
