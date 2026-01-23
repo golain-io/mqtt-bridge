@@ -720,7 +720,7 @@ func TestCloseUnblocksWrite(t *testing.T) {
 	writeErr := make(chan error, 1)
 	go func() {
 		defer close(writeDone)
-		largeData := make([]byte, 1024*1024) // 1MB to potentially cause blocking
+		largeData := make([]byte, 10*1024*1024) // 10MB to potentially cause blocking
 		_, err := clientConn.Write(largeData)
 		writeErr <- err
 	}()
