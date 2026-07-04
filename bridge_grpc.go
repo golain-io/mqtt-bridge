@@ -586,8 +586,16 @@ func (b *MQTTBridge) closeSession(sessionID string) {
 
 // handleUnaryCall processes a unary RPC call
 func (b *MQTTBridge) handleUnaryCall(pkg, service string, methodDesc *grpc.MethodDesc, session *Session, frame Frame) {
+	b.servicesRWMutex.RLock()
+	svcInfo, ok := b.servicesRW[fmt.Sprintf("%s.%s", pkg, service)]
+	b.servicesRWMutex.RUnlock()
+	if !ok {
+		b.sendError(pkg, service, methodDesc.MethodName, session.ID,
+			status.Error(codes.NotFound, "service not found"))
+		return
+	}
+	serviceImpl := svcInfo.serviceImpl
 	ctx := context.Background()
-	serviceImpl := b.servicesRW[fmt.Sprintf("%s.%s", pkg, service)].serviceImpl
 
 	// Call the handler
 	resp, err := methodDesc.Handler(serviceImpl, ctx, func(req interface{}) error {
