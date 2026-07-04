@@ -237,33 +237,25 @@ func (fm *fragmentManager) addFragment(header *Header, data []byte) ([]byte, boo
 		fm.buffers[header.SequenceNumber] = buffer
 	}
 
-	// Validate fragment
 	if header.FragmentSeq >= buffer.fragmentTotal {
 		return nil, false, errors.New("invalid fragment sequence")
 	}
 
-	// Store fragment
 	buffer.fragments[header.FragmentSeq] = data
 	buffer.totalSize += len(data)
 	buffer.lastUpdate = now
 
-	// Check if we have all fragments
-	if len(buffer.fragments) == int(buffer.fragmentTotal) {
-		tmp := getBuf(buffer.totalSize)[:0]
-		for i := uint16(0); i < buffer.fragmentTotal; i++ {
-			tmp = append(tmp, buffer.fragments[i]...)
-		}
-
-		delete(fm.buffers, header.SequenceNumber)
-
-		// result escapes to the caller, so it must be owned memory.
-		result := make([]byte, len(tmp))
-		copy(result, tmp)
-		putBuf(tmp)
-		return result, true, nil
+	if len(buffer.fragments) != int(buffer.fragmentTotal) {
+		return nil, false, nil
 	}
 
-	return nil, false, nil
+	result := make([]byte, buffer.totalSize)
+	off := 0
+	for i := uint16(0); i < buffer.fragmentTotal; i++ {
+		off += copy(result[off:], buffer.fragments[i])
+	}
+	delete(fm.buffers, header.SequenceNumber)
+	return result, true, nil
 }
 
 func (fm *fragmentManager) cleanup() {
