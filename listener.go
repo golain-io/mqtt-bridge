@@ -40,8 +40,9 @@ type MQTTNetBridge struct {
 	proxyAddr net.Addr
 
 	// Add mutex and closed flag for safe shutdown
-	closeMu sync.Mutex
-	closed  bool
+	closeMu      sync.Mutex
+	closed       bool
+	connCleanup  sync.WaitGroup
 }
 
 // MQTTAddr implements net.Addr for MQTT connections
@@ -205,18 +206,14 @@ func (b *MQTTNetBridge) Close() error {
 	b.logger.Info("Closing MQTT bridge", zap.String("bridgeID", b.bridgeID))
 	b.cancel() // Cancel the context
 
-	// Get all sessions first
-	sessions := b.sessionManager.GetAllSessions()
+	// Wait for in-flight conn.Close cleanup before suspending sessions.
+	b.connCleanup.Wait()
 
-	// Suspend all active sessions
-	for _, session := range sessions {
-		// Mark as suspended in memory and trigger hooks
-		if session.State == BridgeSessionStateActive {
-			if err := b.sessionManager.SuspendSession(session.ID, session.ClientID); err != nil {
-				b.logger.Error("Failed to suspend session during shutdown",
-					zap.String("sessionID", session.ID),
-					zap.Error(err))
-			}
+	for id, clientID := range b.sessionManager.ActiveSessionClientIDs() {
+		if err := b.sessionManager.SuspendSession(id, clientID); err != nil {
+			b.logger.Error("Failed to suspend session during shutdown",
+				zap.String("sessionID", id),
+				zap.Error(err))
 		}
 	}
 
@@ -285,12 +282,14 @@ func (b *MQTTNetBridge) DisconnectSession(sessionID string) error {
 		return NewSessionNotFoundError("disconnect", sessionID)
 	}
 
-	// Send disconnect request
-	requestTopic := fmt.Sprintf(handshakeRequestTopic, b.rootTopic, session.Connection.remoteAddr.String(), b.clientID)
-	msg := fmt.Sprintf("%s:%s", disconnectMsg, sessionID)
-	token := b.mqttClient.Publish(requestTopic, b.qos, false, []byte(msg))
-	if token.Wait() && token.Error() != nil {
-		return NewBridgeError("disconnect", "disconnect request failed", token.Error())
+	if session.Connection != nil {
+		// Send disconnect request
+		requestTopic := fmt.Sprintf(handshakeRequestTopic, b.rootTopic, session.Connection.remoteAddr.String(), b.clientID)
+		msg := fmt.Sprintf("%s:%s", disconnectMsg, sessionID)
+		token := b.mqttClient.Publish(requestTopic, b.qos, false, []byte(msg))
+		if token.Wait() && token.Error() != nil {
+			return NewBridgeError("disconnect", "disconnect request failed", token.Error())
+		}
 	}
 
 	return b.sessionManager.DisconnectSession(sessionID)

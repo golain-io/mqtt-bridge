@@ -118,6 +118,38 @@ func (sm *SessionManager) GetSession(sessionID string) (*SessionInfo, bool) {
 	return session, exists
 }
 
+// IsSessionActive reports whether sessionID exists and is in the active state.
+func (sm *SessionManager) IsSessionActive(sessionID string) bool {
+	sm.sessionsMu.RLock()
+	defer sm.sessionsMu.RUnlock()
+	session, exists := sm.sessions[sessionID]
+	return exists && session.State == BridgeSessionStateActive
+}
+
+// SessionConnection returns the active connection for sessionID, if any.
+func (sm *SessionManager) SessionConnection(sessionID string) (*MQTTNetBridgeConn, bool) {
+	sm.sessionsMu.RLock()
+	defer sm.sessionsMu.RUnlock()
+	session, exists := sm.sessions[sessionID]
+	if !exists || session.State != BridgeSessionStateActive || session.Connection == nil {
+		return nil, false
+	}
+	return session.Connection, true
+}
+
+// ActiveSessionClientIDs returns active session IDs mapped to their client IDs.
+func (sm *SessionManager) ActiveSessionClientIDs() map[string]string {
+	sm.sessionsMu.RLock()
+	defer sm.sessionsMu.RUnlock()
+	out := make(map[string]string)
+	for id, session := range sm.sessions {
+		if session.State == BridgeSessionStateActive {
+			out[id] = session.ClientID
+		}
+	}
+	return out
+}
+
 // AddSession adds a new session to the manager
 func (sm *SessionManager) AddSession(sessionID string, session *SessionInfo) {
 	sm.sessionsMu.Lock()
@@ -235,8 +267,11 @@ func (sm *SessionManager) DisconnectSession(sessionID string) error {
 	}
 
 	clientID := session.ClientID
-	remoteAddr := session.Connection.remoteAddr.String()
 	conn := session.Connection
+	var remoteAddr string
+	if conn != nil {
+		remoteAddr = conn.remoteAddr.String()
+	}
 	session.State = BridgeSessionStateClosed
 	sm.sessionsMu.Unlock()
 

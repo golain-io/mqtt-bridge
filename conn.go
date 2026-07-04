@@ -120,55 +120,56 @@ func (c *MQTTNetBridgeConn) Write(b []byte) (n int, err error) {
 		topic = c.downTopic // Server writes to down topic
 	}
 
-	token := c.bridge.mqttClient.Publish(topic, c.bridge.qos, false, b)
 	c.bridge.logger.Debug("Writing data",
 		zap.String("sessionID", c.sessionID),
 		zap.Int("bytes", len(b)),
 		zap.String("topic", topic))
 
-	// Wait for publish with timeout, but check context periodically
 	done := make(chan struct{})
 	var publishErr error
 	go func() {
+		defer close(done)
+		token := c.bridge.mqttClient.Publish(topic, c.bridge.qos, false, b)
 		if !token.WaitTimeout(5 * time.Second) {
 			publishErr = fmt.Errorf("write timeout")
 		} else if token.Error() != nil {
 			publishErr = token.Error()
 		}
-		close(done)
 	}()
 
-	// Wait for publish to complete, but also check for closure
-	select {
-	case <-c.ctx.Done():
-		return 0, net.ErrClosed
-	case <-done:
-		// Publish completed, but check if connection was closed
-		// This check must happen AFTER publish completes but BEFORE we return
-		c.closeMu.RLock()
-		closed := c.closed
-		c.closeMu.RUnlock()
-		if closed {
-			return 0, net.ErrClosed
-		}
-		// Also check context one more time as a final check
+	for {
 		select {
 		case <-c.ctx.Done():
 			return 0, net.ErrClosed
-		default:
-			// Context not cancelled, but check closed flag one more time
-			// to handle race condition where Close() is called between checks
-			c.closeMu.RLock()
-			if c.closed {
-				c.closeMu.RUnlock()
+		case <-done:
+			if c.ctx.Err() != nil {
 				return 0, net.ErrClosed
 			}
+			c.closeMu.RLock()
+			closed := c.closed
 			c.closeMu.RUnlock()
+			if closed {
+				return 0, net.ErrClosed
+			}
+			if publishErr != nil {
+				select {
+				case <-c.ctx.Done():
+					return 0, net.ErrClosed
+				case <-time.After(200 * time.Millisecond):
+					if c.ctx.Err() != nil {
+						return 0, net.ErrClosed
+					}
+					c.closeMu.RLock()
+					if c.closed {
+						c.closeMu.RUnlock()
+						return 0, net.ErrClosed
+					}
+					c.closeMu.RUnlock()
+					return 0, publishErr
+				}
+			}
+			return len(b), nil
 		}
-		if publishErr != nil {
-			return 0, publishErr
-		}
-		return len(b), nil
 	}
 }
 
@@ -181,31 +182,46 @@ func (c *MQTTNetBridgeConn) Close() error {
 	c.closed = true
 	c.closeMu.Unlock()
 
-	// FIRST: Cancel context to unblock any waiting Read/Write operations
-	c.cancel()
+	alreadyClosed := false
+	select {
+	case <-c.ctx.Done():
+		alreadyClosed = true
+	default:
+	}
 
-	// SECOND: Close readBuf to signal EOF to readers (idempotent via sync.Once)
+	shouldDisconnect := false
+	if !alreadyClosed {
+		shouldDisconnect = c.bridge.sessionManager.IsSessionActive(c.sessionID)
+	}
+
+	c.cancel()
 	c.readBufClose.Do(func() {
 		close(c.readBuf)
 	})
 
-	// THEN: Handle session cleanup (non-blocking path)
-	select {
-	case <-c.ctx.Done():
-		// Context already cancelled, we're being closed by DisconnectSession
+	if alreadyClosed {
 		return nil
-	default:
-		c.bridge.mqttClient.Unsubscribe(c.downTopic)
-		c.bridge.mqttClient.Unsubscribe(c.upTopic)
-
-		if session, exists := c.bridge.sessionManager.GetSession(c.sessionID); exists && session.State == BridgeSessionStateActive {
-			if err := c.bridge.DisconnectSession(c.sessionID); err != nil {
-				c.bridge.logger.Error("Failed to disconnect session during close",
-					zap.String("sessionID", c.sessionID),
-					zap.Error(err))
-			}
-		}
 	}
+
+	c.bridge.mqttClient.Unsubscribe(c.downTopic)
+	c.bridge.mqttClient.Unsubscribe(c.upTopic)
+
+	sessionID := c.sessionID
+	bridge := c.bridge
+	if !shouldDisconnect {
+		return nil
+	}
+
+	bridge.connCleanup.Add(1)
+	go func() {
+		defer bridge.connCleanup.Done()
+
+		if err := bridge.DisconnectSession(sessionID); err != nil {
+			bridge.logger.Error("Failed to disconnect session during close",
+				zap.String("sessionID", sessionID),
+				zap.Error(err))
+		}
+	}()
 
 	return nil
 }

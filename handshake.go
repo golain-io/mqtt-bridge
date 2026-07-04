@@ -66,15 +66,24 @@ func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message)
 	}
 
 	sessionID := parts[len(parts)-2]
-	session, exists := b.sessionManager.GetSession(sessionID)
-	if !exists || session.Connection == nil || session.Connection.closed {
+	conn, ok := b.sessionManager.SessionConnection(sessionID)
+	if !ok {
+		b.logger.Debug("No active session/connection",
+			zap.String("sessionID", sessionID))
+		return
+	}
+
+	conn.closeMu.RLock()
+	closed := conn.closed
+	conn.closeMu.RUnlock()
+	if closed {
 		b.logger.Debug("No active session/connection",
 			zap.String("sessionID", sessionID))
 		return
 	}
 
 	select {
-	case session.Connection.readBuf <- payload:
+	case conn.readBuf <- payload:
 		b.logger.Debug("Forwarded data to connection",
 			zap.String("sessionID", sessionID),
 			zap.Int("bytes", len(payload)))
