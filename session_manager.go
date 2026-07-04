@@ -62,6 +62,23 @@ func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger, cleanUpInterva
 	return sm
 }
 
+func (sm *SessionManager) newConn(sessionID, clientID string) *MQTTNetBridgeConn {
+	ctx, cancel := context.WithCancel(sm.bridge.ctx)
+	return &MQTTNetBridgeConn{
+		ctx:        ctx,
+		cancel:     cancel,
+		bridge:     sm.bridge,
+		sessionID:  sessionID,
+		readBuf:    make(chan []byte, 100),
+		localAddr:  sm.bridge.Addr(),
+		remoteAddr: &MQTTAddr{network: "mqtt", address: clientID},
+		upTopic:    fmt.Sprintf(sessionUpTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, sessionID),
+		downTopic:  fmt.Sprintf(sessionDownTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, sessionID),
+		role:       "server",
+		connMu:     sync.RWMutex{},
+	}
+}
+
 // loadSessions loads all sessions from the storage
 func (sm *SessionManager) loadSessions() error {
 	if sm.store == nil {
@@ -79,19 +96,7 @@ func (sm *SessionManager) loadSessions() error {
 	for id, session := range sessions {
 		// Create a new connection for active sessions
 		if session.State == BridgeSessionStateActive {
-			conn := &MQTTNetBridgeConn{
-				ctx:        sm.ctx,
-				cancel:     func() {}, // Will be set by the bridge when needed
-				bridge:     sm.bridge,
-				sessionID:  session.ID,
-				readBuf:    make(chan []byte, 100),
-				localAddr:  sm.bridge.Addr(),
-				remoteAddr: &MQTTAddr{network: "mqtt", address: session.ClientID},
-				upTopic:    fmt.Sprintf(sessionUpTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, session.ID),
-				downTopic:  fmt.Sprintf(sessionDownTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, session.ID),
-				role:       "server",
-				connMu:     sync.RWMutex{},
-			}
+			conn := sm.newConn(session.ID, session.ClientID)
 			session.Connection = conn
 		}
 
@@ -133,19 +138,7 @@ func (sm *SessionManager) CreateSession(sessionID, clientID string, timeout time
 	defer sm.sessionsMu.Unlock()
 
 	// Create a new connection
-	conn := &MQTTNetBridgeConn{
-		ctx:        sm.ctx,
-		cancel:     func() {}, // Will be set by the bridge when needed
-		bridge:     sm.bridge,
-		sessionID:  sessionID,
-		readBuf:    make(chan []byte, 100),
-		localAddr:  sm.bridge.Addr(),
-		remoteAddr: &MQTTAddr{network: "mqtt", address: clientID},
-		upTopic:    fmt.Sprintf(sessionUpTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, sessionID),
-		downTopic:  fmt.Sprintf(sessionDownTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, sessionID),
-		role:       "server",
-		connMu:     sync.RWMutex{},
-	}
+	conn := sm.newConn(sessionID, clientID)
 
 	session := &SessionInfo{
 		ID:         sessionID,
@@ -575,19 +568,7 @@ func (sm *SessionManager) UpdateStore(store ISessionStore) error {
 
 		// Create new connection for active sessions that don't exist in memory
 		if storedSession.State == BridgeSessionStateActive && storedSession.Connection == nil {
-			conn := &MQTTNetBridgeConn{
-				ctx:        sm.ctx,
-				cancel:     func() {}, // Will be set by the bridge when needed
-				bridge:     sm.bridge,
-				sessionID:  storedSession.ID,
-				readBuf:    make(chan []byte, 100),
-				localAddr:  sm.bridge.Addr(),
-				remoteAddr: &MQTTAddr{network: "mqtt", address: storedSession.ClientID},
-				upTopic:    fmt.Sprintf(sessionUpTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, storedSession.ID),
-				downTopic:  fmt.Sprintf(sessionDownTopic, sm.bridge.rootTopic, sm.bridge.bridgeID, storedSession.ID),
-				role:       "server",
-				connMu:     sync.RWMutex{},
-			}
+			conn := sm.newConn(storedSession.ID, storedSession.ClientID)
 			storedSession.Connection = conn
 		}
 
