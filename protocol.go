@@ -1,7 +1,6 @@
 package bridge
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,13 +10,6 @@ import (
 
 var (
 	MaxFragmentSize = 10 * 1024 // 10KB per fragment
-
-	// Pool for large message assembly
-	largeBufferPool = sync.Pool{
-		New: func() interface{} {
-			return bytes.NewBuffer(make([]byte, 0, MaxFragmentSize))
-		},
-	}
 )
 
 func SetMaxFragmentSize(size int) {
@@ -338,19 +330,6 @@ func (f *Frame) appendTo(dst []byte) []byte {
 // The returned slice is caller-owned (not pooled).
 func (f *Frame) Marshal() []byte {
 	return f.appendTo(make([]byte, 0, calculateHeaderSize(f.Header.StreamID)+len(f.Data)))
-}
-
-// Add a new helper for creating large messages
-func NewLargeMessage(size int) *bytes.Buffer {
-	buf := largeBufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	buf.Grow(size)
-	return buf
-}
-
-// Add a helper to return large message buffers to the pool
-func ReleaseLargeMessage(buf *bytes.Buffer) {
-	largeBufferPool.Put(buf)
 }
 
 // UnmarshalFrame converts a byte slice into a Frame
