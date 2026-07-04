@@ -40,16 +40,6 @@ type SessionManager struct {
 	sessions   map[string]*SessionInfo
 	sessionsMu sync.RWMutex
 
-	// Channel maps for session events
-	sessionSuspendedChanMap   map[string]chan struct{}
-	sessionSuspendedChanMapMu sync.RWMutex
-
-	sessionResumeChanMap   map[string]chan struct{}
-	sessionResumeChanMapMu sync.RWMutex
-
-	sessionErrorChanMap   map[string]chan struct{}
-	sessionErrorChanMapMu sync.RWMutex
-
 	// Context for cleanup
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -61,14 +51,11 @@ func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger, cleanUpInterva
 
 	// Initialize with default values
 	sm := &SessionManager{
-		bridge:                  bridge,
-		logger:                  logger,
-		sessions:                make(map[string]*SessionInfo),
-		sessionSuspendedChanMap: make(map[string]chan struct{}),
-		sessionResumeChanMap:    make(map[string]chan struct{}),
-		sessionErrorChanMap:     make(map[string]chan struct{}),
-		ctx:                     ctx,
-		cancel:                  cancel,
+		bridge:   bridge,
+		logger:   logger,
+		sessions: make(map[string]*SessionInfo),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 
 	sm.startCleanupTask(cleanUpInterval)
@@ -444,24 +431,6 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 			return
 		}
 		sessionID := msgParts[1]
-
-		// Signal suspend acknowledgment if channel exists
-		sm.sessionSuspendedChanMapMu.RLock()
-		suspendChan, exists := sm.sessionSuspendedChanMap[sessionID]
-		sm.sessionSuspendedChanMapMu.RUnlock()
-		if exists {
-			select {
-			case suspendChan <- struct{}{}:
-				sm.logger.Debug("Sent suspend acknowledgment",
-					zap.String("sessionID", sessionID))
-			default:
-				sm.logger.Warn("Failed to send suspend acknowledgment - channel full",
-					zap.String("sessionID", sessionID))
-			}
-		} else {
-			sm.logger.Debug("Suspend chan not found",
-				zap.String("sessionID", sessionID))
-		}
 
 		sm.SuspendSession(sessionID, "")
 
