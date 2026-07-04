@@ -62,15 +62,6 @@ type MQTTAddr struct {
 func (a *MQTTAddr) Network() string { return a.network }
 func (a *MQTTAddr) String() string  { return a.address }
 
-// ProxyAddr implements net.Addr for proxy connections
-type ProxyAddr struct {
-	network string
-	address string
-}
-
-func (a *ProxyAddr) Network() string { return a.network }
-func (a *ProxyAddr) String() string  { return a.address }
-
 // Update constants for topic patterns
 const (
 	// Handshake topics

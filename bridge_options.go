@@ -90,7 +90,7 @@ func WithMaxConnections(max int) BridgeOption {
 
 func WithProxyAddr(network, addr string) BridgeOption {
 	return func(cfg *BridgeConfig) {
-		cfg.proxyAddr = &ProxyAddr{
+		cfg.proxyAddr = &MQTTAddr{
 			network: network,
 			address: addr,
 		}
