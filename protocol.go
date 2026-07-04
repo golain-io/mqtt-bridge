@@ -8,14 +8,6 @@ import (
 	"time"
 )
 
-var (
-	MaxFragmentSize = 10 * 1024 // 10KB per fragment
-)
-
-func SetMaxFragmentSize(size int) {
-	MaxFragmentSize = size
-}
-
 type MessageType uint8
 
 const (
@@ -37,6 +29,7 @@ type Header struct {
 }
 
 const (
+	MaxFragmentSize        = 10 * 1024 // 10KB per fragment
 	MinHeaderSize          = 16        // Fixed header size without StreamID
 	MaxStreamIDSize        = 256       // Maximum length for StreamID
 	MinSequenceNum         = 1         // Minimum sequence number

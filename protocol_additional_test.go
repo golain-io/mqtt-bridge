@@ -90,16 +90,3 @@ func TestMessage(t *testing.T) {
 		})
 	}
 }
-
-func TestSetMaxFragmentSize(t *testing.T) {
-	originalSize := MaxFragmentSize
-	defer func() {
-		MaxFragmentSize = originalSize
-	}()
-
-	newSize := 1024
-	SetMaxFragmentSize(newSize)
-	if MaxFragmentSize != newSize {
-		t.Errorf("MaxFragmentSize = %d; want %d", MaxFragmentSize, newSize)
-	}
-}
