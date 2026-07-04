@@ -11,22 +11,6 @@ import (
 
 var (
 	MaxFragmentSize = 10 * 1024 // 10KB per fragment
-	HeaderSize      = 16        // Fixed header size
-
-	// Pool for frame marshaling
-	frameBufferPool = sync.Pool{
-		New: func() interface{} {
-			return new(bytes.Buffer)
-		},
-	}
-
-	// Pool for header marshaling
-	headerBufferPool = sync.Pool{
-		New: func() interface{} {
-			// Pre-allocate with reasonable capacity for header
-			return bytes.NewBuffer(make([]byte, 0, MinHeaderSize+256)) // 256 bytes extra for StreamID
-		},
-	}
 
 	// Pool for large message assembly
 	largeBufferPool = sync.Pool{
@@ -140,43 +124,36 @@ func WithFragmentation(fragmentID uint16, total uint16, seq uint16, isLast bool)
 	}
 }
 
-func (h *Header) marshal() []byte {
-	// Validate StreamID before marshaling
+// appendHeader appends the wire encoding of h to dst and returns the extended
+// slice. Layout: Type(1) | SequenceNumber(8) | FragmentID(2) | FragmentTotal(2)
+// | FragmentSeq(2) | IsLastFragment(1) | len(StreamID)(2) | StreamID.
+func appendHeader(dst []byte, h *Header) []byte {
 	if err := validateStreamID(h.StreamID); err != nil {
 		panic(fmt.Sprintf("invalid stream ID in header: %v", err))
 	}
 
-	buf := headerBufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer headerBufferPool.Put(buf)
-
-	// Write fixed fields
-	buf.WriteByte(byte(h.Type))
-	binary.Write(buf, binary.BigEndian, h.SequenceNumber)
-	binary.Write(buf, binary.BigEndian, h.FragmentID)
-	binary.Write(buf, binary.BigEndian, h.FragmentTotal)
-	binary.Write(buf, binary.BigEndian, h.FragmentSeq)
+	var fixed [MinHeaderSize + 2]byte
+	fixed[0] = byte(h.Type)
+	binary.BigEndian.PutUint64(fixed[1:], h.SequenceNumber)
+	binary.BigEndian.PutUint16(fixed[9:], h.FragmentID)
+	binary.BigEndian.PutUint16(fixed[11:], h.FragmentTotal)
+	binary.BigEndian.PutUint16(fixed[13:], h.FragmentSeq)
 	if h.IsLastFragment {
-		buf.WriteByte(1)
-	} else {
-		buf.WriteByte(0)
+		fixed[15] = 1
 	}
+	binary.BigEndian.PutUint16(fixed[16:], uint16(len(h.StreamID)))
 
-	// Write StreamID length and value (even if empty)
-	streamIDBytes := []byte(h.StreamID)
-	binary.Write(buf, binary.BigEndian, uint16(len(streamIDBytes)))
-	if len(streamIDBytes) > 0 {
-		buf.Write(streamIDBytes)
-	}
+	dst = append(dst, fixed[:]...)
+	dst = append(dst, h.StreamID...)
+	return dst
+}
 
-	// Make a copy since we're recycling the buffer
-	result := make([]byte, buf.Len())
-	copy(result, buf.Bytes())
-	return result
+func (h *Header) marshal() []byte {
+	return appendHeader(make([]byte, 0, calculateHeaderSize(h.StreamID)), h)
 }
 
 func unmarshalHeader(data []byte) (*Header, error) {
-	if len(data) < HeaderSize {
+	if len(data) < MinHeaderSize {
 		return nil, errors.New("data too short for header")
 	}
 
@@ -189,7 +166,7 @@ func unmarshalHeader(data []byte) (*Header, error) {
 		FragmentSeq:    binary.BigEndian.Uint16(data[pos+13:]),
 		IsLastFragment: data[pos+15] == 1,
 	}
-	pos += HeaderSize
+	pos += MinHeaderSize
 
 	// Read StreamID length
 	if len(data) < pos+2 {
@@ -214,21 +191,10 @@ type message struct {
 }
 
 func (m *message) marshal() []byte {
-	buf := frameBufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer frameBufferPool.Put(buf)
-
-	// Pre-allocate expected size
-	buf.Grow(8 + len(m.Data))
-
-	// Write sequence number
-	binary.Write(buf, binary.BigEndian, m.SequenceNumber)
-	buf.Write(m.Data)
-
-	// Make a copy since we're recycling the buffer
-	result := make([]byte, buf.Len())
-	copy(result, buf.Bytes())
-	return result
+	buf := make([]byte, 8+len(m.Data))
+	binary.BigEndian.PutUint64(buf, m.SequenceNumber)
+	copy(buf[8:], m.Data)
+	return buf
 }
 
 func unmarshalMessage(data []byte) (*message, error) {
@@ -249,9 +215,10 @@ type fragmentBuffer struct {
 }
 
 type fragmentManager struct {
-	mu      sync.Mutex
-	buffers map[uint64]*fragmentBuffer // keyed by FragmentID
-	timeout time.Duration
+	mu          sync.Mutex
+	buffers     map[uint64]*fragmentBuffer // keyed by FragmentID
+	timeout     time.Duration
+	lastCleanup time.Time
 }
 
 func newFragmentManager(timeout time.Duration) *fragmentManager {
@@ -265,15 +232,22 @@ func (fm *fragmentManager) addFragment(header *Header, data []byte) ([]byte, boo
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 
-	// Clean up old fragments
-	fm.cleanup()
+	now := time.Now()
+
+	// ponytail: cleanup is throttled to at most once per timeout window instead
+	// of scanning every map on every fragment. Ceiling: stale buffers may linger
+	// up to ~2x timeout; upgrade path = a per-buffer timer.
+	if now.Sub(fm.lastCleanup) > fm.timeout {
+		fm.cleanupExpired(now)
+		fm.lastCleanup = now
+	}
 
 	buffer, exists := fm.buffers[header.SequenceNumber]
 	if !exists {
 		buffer = &fragmentBuffer{
 			fragments:     make(map[uint16][]byte),
 			fragmentTotal: header.FragmentTotal,
-			lastUpdate:    time.Now(),
+			lastUpdate:    now,
 		}
 		fm.buffers[header.SequenceNumber] = buffer
 	}
@@ -286,26 +260,21 @@ func (fm *fragmentManager) addFragment(header *Header, data []byte) ([]byte, boo
 	// Store fragment
 	buffer.fragments[header.FragmentSeq] = data
 	buffer.totalSize += len(data)
-	buffer.lastUpdate = time.Now()
+	buffer.lastUpdate = now
 
 	// Check if we have all fragments
 	if len(buffer.fragments) == int(buffer.fragmentTotal) {
-		buf := largeBufferPool.Get().(*bytes.Buffer)
-		buf.Reset()
-		defer largeBufferPool.Put(buf)
-
-		buf.Grow(buffer.totalSize)
-
+		tmp := getBuf(buffer.totalSize)[:0]
 		for i := uint16(0); i < buffer.fragmentTotal; i++ {
-			buf.Write(buffer.fragments[i])
+			tmp = append(tmp, buffer.fragments[i]...)
 		}
 
-		// Clean up
 		delete(fm.buffers, header.SequenceNumber)
 
-		// Make a copy since we're recycling the buffer
-		result := make([]byte, buf.Len())
-		copy(result, buf.Bytes())
+		// result escapes to the caller, so it must be owned memory.
+		result := make([]byte, len(tmp))
+		copy(result, tmp)
+		putBuf(tmp)
 		return result, true, nil
 	}
 
@@ -313,7 +282,10 @@ func (fm *fragmentManager) addFragment(header *Header, data []byte) ([]byte, boo
 }
 
 func (fm *fragmentManager) cleanup() {
-	now := time.Now()
+	fm.cleanupExpired(time.Now())
+}
+
+func (fm *fragmentManager) cleanupExpired(now time.Time) {
 	for seq, buffer := range fm.buffers {
 		if now.Sub(buffer.lastUpdate) > fm.timeout {
 			delete(fm.buffers, seq)
@@ -355,27 +327,17 @@ func FrameMessage(data []byte, seqNum uint64, msgType MessageType) []Frame {
 	return frames
 }
 
-// MarshalFrame converts a Frame into a single byte slice ready for transmission
+// appendTo appends the wire encoding of the frame (header + data) to dst.
+func (f *Frame) appendTo(dst []byte) []byte {
+	dst = appendHeader(dst, f.Header)
+	dst = append(dst, f.Data...)
+	return dst
+}
+
+// Marshal converts a Frame into a single byte slice ready for transmission.
+// The returned slice is caller-owned (not pooled).
 func (f *Frame) Marshal() []byte {
-	buf := frameBufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer frameBufferPool.Put(buf)
-
-	// Marshal header first to get its size
-	headerBytes := f.Header.marshal()
-
-	// Pre-allocate the full size
-	totalSize := len(headerBytes) + len(f.Data)
-	buf.Grow(totalSize)
-
-	// Write header and data
-	buf.Write(headerBytes)
-	buf.Write(f.Data)
-
-	// Make a copy since we're recycling the buffer
-	result := make([]byte, buf.Len())
-	copy(result, buf.Bytes())
-	return result
+	return f.appendTo(make([]byte, 0, calculateHeaderSize(f.Header.StreamID)+len(f.Data)))
 }
 
 // Add a new helper for creating large messages
