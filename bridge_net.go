@@ -749,14 +749,14 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 	session, exists := b.sessionManager.GetSession(sessionID)
 	if !exists {
 		b.logger.Error("Session not found", zap.String("sessionID", sessionID))
-		return NewSessionNotFoundError(sessionID)
+		return NewSessionNotFoundError("suspend", sessionID)
 	}
 
 	if session.State != BridgeSessionStateActive {
 		b.logger.Error("Cannot suspend inactive session",
 			zap.String("sessionID", sessionID),
 			zap.String("state", session.State.String()))
-		return NewSessionSuspendedError(sessionID)
+		return NewSessionSuspendedError("suspend", sessionID)
 	}
 
 	// Prepare suspend message
@@ -783,7 +783,7 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 
 		msgParts := strings.Split(string(m.Payload()), ":")
 		if len(msgParts) > 0 && msgParts[0] == "error" {
-			done <- NewSessionNotFoundError(sessionID)
+			done <- NewSessionNotFoundError("suspend", sessionID)
 			return
 		}
 		done <- nil
@@ -820,7 +820,7 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 func (b *MQTTNetBridge) ResumeSession(ctx context.Context, targetBridgeID, sessionID string) (net.Conn, error) {
 	session, exists := b.sessionManager.GetSession(sessionID)
 	if exists && session.State == BridgeSessionStateActive {
-		return nil, NewSessionActiveError(sessionID)
+		return nil, NewSessionActiveError("resume", sessionID)
 	}
 
 	b.logger.Info("Resuming session", zap.String("sessionID", sessionID))
@@ -1151,7 +1151,7 @@ func (b *MQTTNetBridge) CleanupStaleSessions() {
 func (b *MQTTNetBridge) DisconnectSession(sessionID string) error {
 	session, exists := b.sessionManager.GetSession(sessionID)
 	if !exists {
-		return NewSessionNotFoundError(sessionID)
+		return NewSessionNotFoundError("disconnect", sessionID)
 	}
 
 	// Send disconnect request

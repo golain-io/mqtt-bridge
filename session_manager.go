@@ -161,13 +161,13 @@ func (sm *SessionManager) SuspendSession(sessionID string, clientID string) erro
 	session, exists := sm.sessions[sessionID]
 	if !exists {
 		sm.sessionsMu.Unlock()
-		return NewSessionNotFoundError(sessionID)
+		return NewSessionNotFoundError("suspend", sessionID)
 	}
 
 	// Verify client owns this session
 	if session.ClientID != clientID {
 		sm.sessionsMu.Unlock()
-		return NewUnauthorizedError(sessionID)
+		return NewUnauthorizedError("suspend", sessionID)
 	}
 
 	// Only suspend active sessions
@@ -210,7 +210,7 @@ func (sm *SessionManager) ResumeSession(sessionID string) error {
 	session, exists := sm.sessions[sessionID]
 	if !exists {
 		sm.sessionsMu.Unlock()
-		return NewSessionNotFoundError(sessionID)
+		return NewSessionNotFoundError("resume", sessionID)
 	}
 
 	if session.State != BridgeSessionStateSuspended {
@@ -231,7 +231,7 @@ func (sm *SessionManager) DisconnectSession(sessionID string) error {
 	session, exists := sm.sessions[sessionID]
 	if !exists {
 		sm.sessionsMu.Unlock()
-		return NewSessionNotFoundError(sessionID)
+		return NewSessionNotFoundError("disconnect", sessionID)
 	}
 
 	clientID := session.ClientID
@@ -332,19 +332,19 @@ func (sm *SessionManager) HandleSessionError(sessionID string, errorType string)
 	sm.sessionsMu.RUnlock()
 
 	if !exists {
-		return NewSessionNotFoundError(sessionID)
+		return NewSessionNotFoundError("session", sessionID)
 	}
 
 	var err error
 	switch errorType {
 	case errSessionActive:
-		err = NewSessionActiveError(sessionID)
+		err = NewSessionActiveError("session", sessionID)
 	case errSessionNotFound:
-		err = NewSessionNotFoundError(sessionID)
+		err = NewSessionNotFoundError("session", sessionID)
 	case errInvalidSession:
-		err = NewInvalidSessionError(sessionID)
+		err = NewInvalidSessionError("session", sessionID)
 	case errSessionSuspended:
-		err = NewSessionSuspendedError(sessionID)
+		err = NewSessionSuspendedError("session", sessionID)
 	default:
 		err = NewBridgeError("session", fmt.Sprintf("server error: %s", errorType), nil)
 	}
@@ -366,7 +366,7 @@ func (sm *SessionManager) HandleDisconnect(clientID, sessionID string) error {
 	if !exists {
 		sm.logger.Debug("No session found for disconnect",
 			zap.String("sessionID", sessionID))
-		return NewSessionNotFoundError(sessionID)
+		return NewSessionNotFoundError("disconnect", sessionID)
 	}
 
 	sm.logger.Debug("Found session for disconnect",
@@ -379,11 +379,11 @@ func (sm *SessionManager) HandleDisconnect(clientID, sessionID string) error {
 			zap.String("sessionID", sessionID),
 			zap.String("sessionClientID", session.ClientID),
 			zap.String("requestingClientID", clientID))
-		return NewUnauthorizedError(sessionID)
+		return NewUnauthorizedError("disconnect", sessionID)
 	}
 
 	if session.State != BridgeSessionStateActive {
-		return NewSessionActiveError(sessionID)
+		return NewSessionActiveError("disconnect", sessionID)
 	}
 
 	sm.logger.Info("Disconnecting session",
@@ -493,7 +493,7 @@ func (sm *SessionManager) HandleConnectionEstablished(sessionID string, conn *MQ
 	if exists {
 		// For existing sessions, verify state
 		if session.State == BridgeSessionStateActive {
-			return NewSessionActiveError(sessionID)
+			return NewSessionActiveError("connect", sessionID)
 		}
 		// Update existing session
 		session.State = BridgeSessionStateActive
