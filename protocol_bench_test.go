@@ -19,7 +19,9 @@ func BenchmarkHeaderMarshal(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		header.marshal()
+		if _, err := header.marshal(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -32,7 +34,10 @@ func BenchmarkHeaderUnmarshal(b *testing.B) {
 		FragmentSeq:    2,
 		IsLastFragment: false,
 	}
-	data := header.marshal()
+	data, err := header.marshal()
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -78,7 +83,9 @@ func BenchmarkHeaderMarshalWithPool(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			header.marshal()
+			if _, err := header.marshal(); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 }
@@ -100,7 +107,9 @@ func BenchmarkFrameMarshalWithPool(b *testing.B) {
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
 					for _, frame := range frames {
-						frame.Marshal()
+						if _, err := frame.Marshal(); err != nil {
+							b.Fatal(err)
+						}
 					}
 				}
 			})

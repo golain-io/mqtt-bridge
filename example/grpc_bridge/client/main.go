@@ -67,7 +67,11 @@ func main() {
 	}
 
 	requestTopic := bridge.BuildTopicPath("echo", "EchoService", "Echo", sessionID, "down")
-	token = mqttClient.Publish(requestTopic, 1, false, frame.Marshal())
+	frameData, err := frame.Marshal()
+	if err != nil {
+		logger.Fatal("Failed to marshal frame", zap.Error(err))
+	}
+	token = mqttClient.Publish(requestTopic, 1, false, frameData)
 	if token.Wait() && token.Error() != nil {
 		logger.Fatal("Failed to publish request", zap.Error(token.Error()))
 	}

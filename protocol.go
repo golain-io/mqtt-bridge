@@ -112,9 +112,9 @@ func WithFragmentation(fragmentID uint16, total uint16, seq uint16, isLast bool)
 // appendHeader appends the wire encoding of h to dst and returns the extended
 // slice. Layout: Type(1) | SequenceNumber(8) | FragmentID(2) | FragmentTotal(2)
 // | FragmentSeq(2) | IsLastFragment(1) | len(StreamID)(2) | StreamID.
-func appendHeader(dst []byte, h *Header) []byte {
+func appendHeader(dst []byte, h *Header) ([]byte, error) {
 	if err := validateStreamID(h.StreamID); err != nil {
-		panic(fmt.Sprintf("invalid stream ID in header: %v", err))
+		return nil, fmt.Errorf("invalid stream ID: %w", err)
 	}
 
 	var fixed [MinHeaderSize + 2]byte
@@ -130,10 +130,10 @@ func appendHeader(dst []byte, h *Header) []byte {
 
 	dst = append(dst, fixed[:]...)
 	dst = append(dst, h.StreamID...)
-	return dst
+	return dst, nil
 }
 
-func (h *Header) marshal() []byte {
+func (h *Header) marshal() ([]byte, error) {
 	return appendHeader(make([]byte, 0, calculateHeaderSize(h.StreamID)), h)
 }
 
@@ -313,15 +313,17 @@ func FrameMessage(data []byte, seqNum uint64, msgType MessageType) []Frame {
 }
 
 // appendTo appends the wire encoding of the frame (header + data) to dst.
-func (f *Frame) appendTo(dst []byte) []byte {
-	dst = appendHeader(dst, f.Header)
-	dst = append(dst, f.Data...)
-	return dst
+func (f *Frame) appendTo(dst []byte) ([]byte, error) {
+	dst, err := appendHeader(dst, f.Header)
+	if err != nil {
+		return nil, err
+	}
+	return append(dst, f.Data...), nil
 }
 
 // Marshal converts a Frame into a single byte slice ready for transmission.
 // The returned slice is caller-owned (not pooled).
-func (f *Frame) Marshal() []byte {
+func (f *Frame) Marshal() ([]byte, error) {
 	return f.appendTo(make([]byte, 0, calculateHeaderSize(f.Header.StreamID)+len(f.Data)))
 }
 

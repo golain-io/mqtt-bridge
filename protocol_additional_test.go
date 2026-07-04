@@ -36,7 +36,10 @@ func TestHeader(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data := tt.header.marshal()
+			data, err := tt.header.marshal()
+			if err != nil {
+				t.Fatalf("Failed to marshal header: %v", err)
+			}
 			decoded, err := unmarshalHeader(data)
 			if err != nil {
 				t.Fatalf("Failed to unmarshal header: %v", err)

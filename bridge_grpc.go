@@ -342,9 +342,14 @@ func (b *MQTTBridge) handleMessage(client mqtt.Client, msg mqtt.Message) {
 func (b *MQTTBridge) sendResponse(pkg, service, method, sessionID string, frame Frame) error {
 	topic := BuildTopicPath(pkg, service, method, sessionID, topicUp)
 
-	data := frame.Marshal()
-	token := b.mqttClient.Publish(topic, 1, false, data)
+	size := calculateHeaderSize(frame.Header.StreamID) + len(frame.Data)
+	buf, err := frame.appendTo(getBuf(size)[:0])
+	if err != nil {
+		return fmt.Errorf("marshal frame: %w", err)
+	}
+	token := b.mqttClient.Publish(topic, 1, false, buf)
 	token.Wait()
+	putBuf(buf)
 	return token.Error()
 }
 
