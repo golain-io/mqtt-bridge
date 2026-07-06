@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // MQTTNetBridgeConn implements net.Conn over MQTT.
@@ -121,9 +121,9 @@ func (c *MQTTNetBridgeConn) Write(b []byte) (n int, err error) {
 	}
 
 	c.bridge.logger.Debug("Writing data",
-		zap.String("sessionID", c.sessionID),
-		zap.Int("bytes", len(b)),
-		zap.String("topic", topic))
+		slog.String("sessionID", c.sessionID),
+		slog.Int("bytes", len(b)),
+		slog.String("topic", topic))
 
 	done := make(chan struct{})
 	var publishErr error
@@ -218,8 +218,8 @@ func (c *MQTTNetBridgeConn) Close() error {
 
 		if err := bridge.DisconnectSession(sessionID); err != nil {
 			bridge.logger.Error("Failed to disconnect session during close",
-				zap.String("sessionID", sessionID),
-				zap.Error(err))
+				slog.String("sessionID", sessionID),
+				slog.Any("error", err))
 		}
 	}()
 

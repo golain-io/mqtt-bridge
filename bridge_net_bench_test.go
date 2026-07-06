@@ -10,7 +10,6 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/resolver"
@@ -137,7 +136,7 @@ func BenchmarkNetBridgeEchoRoundTrip(b *testing.B) {
 }
 
 func BenchmarkNetBridgeUnaryGRPC(b *testing.B) {
-	logger := zap.NewNop()
+	logger := NopLogger()
 	rootTopic := "/bench/grpc"
 	serverID := "bench-grpc-server"
 

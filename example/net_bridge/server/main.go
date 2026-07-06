@@ -2,12 +2,12 @@ package main
 
 import (
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
@@ -16,8 +16,7 @@ import (
 )
 
 func main() {
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create MQTT client
 	opts := mqtt.NewClientOptions().

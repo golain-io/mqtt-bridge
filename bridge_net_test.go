@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -12,13 +13,11 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/zap"
 )
 
 func TestMQTTBridgeEchoServer(t *testing.T) {
 	// Setup logger
-	logger, _ := zap.NewProduction()
-	defer logger.Sync()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	// MQTT client options for server
 	serverOpts := mqtt.NewClientOptions().
@@ -75,7 +74,7 @@ func TestMQTTBridgeEchoServer(t *testing.T) {
 	}
 	defer clientClient.Disconnect(250)
 
-	clientLogger, _ := zap.NewDevelopment()
+	clientLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create client bridge
 	clientBridgeID := "test-client"
@@ -194,8 +193,7 @@ func handleTestConnection(t *testing.T, conn io.ReadWriteCloser) {
 
 func TestMQTTBridgeUnsubscribe(t *testing.T) {
 	// Setup logger
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create MQTT clients
 	serverClient := mqtt.NewClient(mqtt.NewClientOptions().
@@ -303,14 +301,13 @@ func TestMQTTBridgeUnsubscribe(t *testing.T) {
 
 func TestMQTTBridgeProxy(t *testing.T) {
 	// Setup logger
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create a temporary Unix socket path with unique name
 	sockPath := "/tmp/test-proxy.sock"
 
 	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
-		logger.Error("Failed to clean up existing socket", zap.String("address", sockPath), zap.Error(err))
+		logger.Error("Failed to clean up existing socket", slog.String("address", sockPath), slog.Any("error", err))
 	}
 
 	// Ensure socket file is cleaned up after test
@@ -522,8 +519,7 @@ func TestMQTTBridgeProxy(t *testing.T) {
 // when Close() is called, as required by the net.Conn interface contract.
 func TestCloseUnblocksRead(t *testing.T) {
 	// Setup logger
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create MQTT clients
 	serverClient := mqtt.NewClient(mqtt.NewClientOptions().
@@ -641,8 +637,7 @@ func TestCloseUnblocksRead(t *testing.T) {
 // when Close() is called, as required by the net.Conn interface contract.
 func TestCloseUnblocksWrite(t *testing.T) {
 	// Setup logger
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create MQTT clients
 	serverClient := mqtt.NewClient(mqtt.NewClientOptions().
@@ -760,8 +755,7 @@ func TestCloseUnblocksWrite(t *testing.T) {
 // TestCloseIdempotent verifies that multiple calls to Close() are safe and idempotent.
 func TestCloseIdempotent(t *testing.T) {
 	// Setup logger
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create MQTT clients
 	serverClient := mqtt.NewClient(mqtt.NewClientOptions().

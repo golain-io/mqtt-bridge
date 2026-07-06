@@ -9,7 +9,7 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
+	"log/slog"
 	"google.golang.org/grpc/resolver"
 )
 
@@ -55,13 +55,13 @@ func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message)
 	payload := b.hooks.OnMessageReceived(msg.Payload())
 
 	b.logger.Debug("Received incoming data",
-		zap.String("topic", msg.Topic()),
-		zap.Int("bytes", len(payload)),
-		zap.String("payload", string(payload)))
+		slog.String("topic", msg.Topic()),
+		slog.Int("bytes", len(payload)),
+		slog.String("payload", string(payload)))
 
 	parts := strings.Split(msg.Topic(), "/")
 	if len(parts) < 6 {
-		b.logger.Error("Invalid topic format", zap.String("topic", msg.Topic()))
+		b.logger.Error("Invalid topic format", slog.String("topic", msg.Topic()))
 		return
 	}
 
@@ -69,7 +69,7 @@ func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message)
 	conn, ok := b.sessionManager.SessionConnection(sessionID)
 	if !ok {
 		b.logger.Debug("No active session/connection",
-			zap.String("sessionID", sessionID))
+			slog.String("sessionID", sessionID))
 		return
 	}
 
@@ -78,18 +78,18 @@ func (b *MQTTNetBridge) handleIncomingData(client mqtt.Client, msg mqtt.Message)
 	conn.closeMu.RUnlock()
 	if closed {
 		b.logger.Debug("No active session/connection",
-			zap.String("sessionID", sessionID))
+			slog.String("sessionID", sessionID))
 		return
 	}
 
 	select {
 	case conn.readBuf <- payload:
 		b.logger.Debug("Forwarded data to connection",
-			zap.String("sessionID", sessionID),
-			zap.Int("bytes", len(payload)))
+			slog.String("sessionID", sessionID),
+			slog.Int("bytes", len(payload)))
 	default:
 		b.logger.Warn("Read buffer full, dropping message",
-			zap.String("session", sessionID))
+			slog.String("session", sessionID))
 	}
 }
 
@@ -114,8 +114,8 @@ func (b *MQTTNetBridge) createNewConnection(sessionID string) *MQTTNetBridgeConn
 	token := b.mqttClient.Subscribe(conn.upTopic, b.qos, b.handleIncomingData)
 	if token.Wait() && token.Error() != nil {
 		b.logger.Error("Failed to subscribe to session topic",
-			zap.String("topic", conn.upTopic),
-			zap.Error(token.Error()))
+			slog.String("topic", conn.upTopic),
+			slog.Any("error", token.Error()))
 		return nil
 	}
 
@@ -127,7 +127,7 @@ func (b *MQTTNetBridge) handleHandshake(client mqtt.Client, msg mqtt.Message) {
 	payload := b.hooks.OnMessageReceived(msg.Payload())
 	parts := strings.Split(msg.Topic(), "/")
 	if len(parts) < 6 || parts[len(parts)-2] != "request" {
-		b.logger.Error("Invalid handshake topic", zap.String("topic", msg.Topic()))
+		b.logger.Error("Invalid handshake topic", slog.String("topic", msg.Topic()))
 		return
 	}
 	msgParts := strings.SplitN(UnsafeString(payload), ":", 2)
@@ -157,16 +157,16 @@ func (b *MQTTNetBridge) handleConnect(clientID, responseTopic string, msgParts [
 
 	sessionID := uuid.New().String()
 	b.logger.Debug("Creating new connection",
-		zap.String("sessionID", sessionID),
-		zap.Duration("elapsed", time.Since(startTime)))
+		slog.String("sessionID", sessionID),
+		slog.Duration("elapsed", time.Since(startTime)))
 
 	conn := b.createNewConnection(sessionID)
 	if conn == nil {
 		err := b.sessionManager.HandleSessionError(sessionID, "failed_to_create_connection")
 		b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, err.Error())))
 		b.logger.Error("Failed to create connection",
-			zap.String("sessionID", sessionID),
-			zap.Duration("elapsed", time.Since(startTime)))
+			slog.String("sessionID", sessionID),
+			slog.Duration("elapsed", time.Since(startTime)))
 		return
 	}
 
@@ -221,9 +221,9 @@ func (b *MQTTNetBridge) handleSuspend(clientID, responseTopic string, msgParts [
 	// Verify the client owns this session
 	if session.ClientID != clientID {
 		b.logger.Warn("Unauthorized suspend attempt",
-			zap.String("sessionID", sessionID),
-			zap.String("sessionClientID", session.ClientID),
-			zap.String("requestingClientID", clientID))
+			slog.String("sessionID", sessionID),
+			slog.String("sessionClientID", session.ClientID),
+			slog.String("requestingClientID", clientID))
 		b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, errUnauthorized)))
 		return
 	}
@@ -236,8 +236,8 @@ func (b *MQTTNetBridge) handleSuspend(clientID, responseTopic string, msgParts [
 	token := b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", suspendAckMsg, sessionID)))
 	if ok := token.Wait(); !ok {
 		b.logger.Error("Error sending suspend ack",
-			zap.String("topic", responseTopic),
-			zap.String("sessionID", sessionID))
+			slog.String("topic", responseTopic),
+			slog.String("sessionID", sessionID))
 		return
 	}
 
@@ -248,8 +248,8 @@ func (b *MQTTNetBridge) handleSuspend(clientID, responseTopic string, msgParts [
 	}
 
 	b.logger.Info("Session suspended",
-		zap.String("sessionID", sessionID),
-		zap.String("clientID", clientID))
+		slog.String("sessionID", sessionID),
+		slog.String("clientID", clientID))
 }
 
 func (b *MQTTNetBridge) handleDisconnect(clientID, responseTopic string, msgParts []string) {
@@ -259,8 +259,8 @@ func (b *MQTTNetBridge) handleDisconnect(clientID, responseTopic string, msgPart
 	err := b.sessionManager.SuspendSession(sessionID, clientID)
 	if err != nil {
 		b.logger.Error("Failed to suspend session",
-			zap.String("sessionID", sessionID),
-			zap.Error(err))
+			slog.String("sessionID", sessionID),
+			slog.Any("error", err))
 		b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, err.Error())))
 		return
 	}
@@ -269,14 +269,14 @@ func (b *MQTTNetBridge) handleDisconnect(clientID, responseTopic string, msgPart
 	token := b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", disconnectAckMsg, sessionID)))
 	if ok := token.Wait(); !ok {
 		b.logger.Error("Error sending disconnect ack",
-			zap.String("topic", responseTopic),
-			zap.String("sessionID", sessionID))
+			slog.String("topic", responseTopic),
+			slog.String("sessionID", sessionID))
 		return
 	}
 
 	b.logger.Info("Session disconnected",
-		zap.String("sessionID", sessionID),
-		zap.String("clientID", clientID))
+		slog.String("sessionID", sessionID),
+		slog.String("clientID", clientID))
 }
 
 // handleNewConnection processes a new connection request
@@ -301,7 +301,7 @@ func (b *MQTTNetBridge) handleNewConnection(conn *MQTTNetBridgeConn, clientID st
 		conn.connMu.Unlock()
 	default:
 		b.logger.Warn("Accept channel full, dropping connection",
-			zap.String("sessionID", conn.sessionID))
+			slog.String("sessionID", conn.sessionID))
 		conn.Close()
 	}
 }

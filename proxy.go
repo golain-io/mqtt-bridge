@@ -9,7 +9,7 @@ import (
 	"os"
 	"syscall"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // listens for connections on a unix socket and proxies them to the bridge
@@ -50,7 +50,7 @@ func (b *MQTTNetBridge) proxyConn(conn net.Conn, bConn net.Conn) {
 	go func() {
 		_, err := io.Copy(bConn, conn)
 		if err != nil && err != io.EOF && !isClosedConnError(err) {
-			b.logger.Error("Error copying data from client to bridge", zap.Error(err))
+			b.logger.Error("Error copying data from client to bridge", slog.Any("error", err))
 		}
 		errChan <- err
 	}()
@@ -59,7 +59,7 @@ func (b *MQTTNetBridge) proxyConn(conn net.Conn, bConn net.Conn) {
 	go func() {
 		_, err := io.Copy(conn, bConn)
 		if err != nil && err != io.EOF && !isClosedConnError(err) {
-			b.logger.Error("Error copying data from bridge to client", zap.Error(err))
+			b.logger.Error("Error copying data from bridge to client", slog.Any("error", err))
 		}
 		errChan <- err
 	}()
@@ -74,7 +74,7 @@ func (b *MQTTNetBridge) proxyConn(conn net.Conn, bConn net.Conn) {
 		}
 		if proxyErr != nil {
 			b.logger.Error("Proxy connection error",
-				zap.Error(proxyErr))
+				slog.Any("error", proxyErr))
 		}
 		close(done)
 	}()

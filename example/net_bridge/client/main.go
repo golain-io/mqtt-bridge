@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
+	"os"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/resolver"
@@ -20,8 +21,7 @@ import (
 )
 
 func main() {
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create MQTT client with unique client ID
 	opts := mqtt.NewClientOptions().

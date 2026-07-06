@@ -10,7 +10,7 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 var (
@@ -22,7 +22,7 @@ var (
 func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ...SessionOption) (net.Conn, error) {
 	startTime := time.Now()
 	b.logger.Debug("Starting Dial operation",
-		zap.String("targetBridgeID", targetBridgeID))
+		slog.String("targetBridgeID", targetBridgeID))
 
 	// Parse session options
 	cfg := &SessionConfig{
@@ -47,8 +47,8 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 	// Create subscription handler
 	handler := func(c mqtt.Client, m mqtt.Message) {
 		b.logger.Debug("Received ack",
-			zap.String("topic", string(m.Topic())),
-			zap.String("payload", string(m.Payload())))
+			slog.String("topic", string(m.Topic())),
+			slog.String("payload", string(m.Payload())))
 		select {
 		case respChan <- struct {
 			payload []byte
@@ -59,7 +59,7 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 		}:
 		default:
 			b.logger.Warn("Response channel full, dropping message",
-				zap.String("topic", m.Topic()))
+				slog.String("topic", m.Topic()))
 		}
 	}
 
@@ -108,8 +108,8 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 			upTopic := ackMatches[2]
 			downTopic := ackMatches[3]
 
-			b.logger.Debug("upTopic", zap.String("upTopic", upTopic))
-			b.logger.Debug("downTopic", zap.String("downTopic", downTopic))
+			b.logger.Debug("upTopic", slog.String("upTopic", upTopic))
+			b.logger.Debug("downTopic", slog.String("downTopic", downTopic))
 
 			// Create client connection
 			connCtx, cancel := context.WithCancel(b.ctx)
@@ -160,9 +160,9 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 			}()
 
 			b.logger.Info("Connection established",
-				zap.String("sessionID", sessionID),
-				zap.String("clientID", clientID),
-				zap.Duration("elapsed", time.Since(startTime)))
+				slog.String("sessionID", sessionID),
+				slog.String("clientID", clientID),
+				slog.Duration("elapsed", time.Since(startTime)))
 
 			return conn, nil
 
@@ -176,12 +176,12 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 
 	case <-time.After(cfg.DialTimeout):
 		b.logger.Error("Handshake timeout",
-			zap.Duration("elapsed", time.Since(startTime)))
+			slog.Duration("elapsed", time.Since(startTime)))
 		return nil, NewBridgeError("dial", "handshake timeout", nil)
 	case <-ctx.Done():
 		b.logger.Error("Context cancelled during handshake",
-			zap.Error(ctx.Err()),
-			zap.Duration("elapsed", time.Since(startTime)))
+			slog.Any("error", ctx.Err()),
+			slog.Duration("elapsed", time.Since(startTime)))
 		return nil, NewBridgeError("dial", "context cancelled", ctx.Err())
 	}
 }
@@ -191,14 +191,14 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 	// Get session info first to get clientID
 	session, exists := b.sessionManager.GetSession(sessionID)
 	if !exists {
-		b.logger.Error("Session not found", zap.String("sessionID", sessionID))
+		b.logger.Error("Session not found", slog.String("sessionID", sessionID))
 		return NewSessionNotFoundError("suspend", sessionID)
 	}
 
 	if session.State != BridgeSessionStateActive {
 		b.logger.Error("Cannot suspend inactive session",
-			zap.String("sessionID", sessionID),
-			zap.String("state", session.State.String()))
+			slog.String("sessionID", sessionID),
+			slog.String("state", session.State.String()))
 		return NewSessionSuspendedError("suspend", sessionID)
 	}
 
@@ -210,8 +210,8 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 	token := b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(suspendPayload))
 	if token.Wait() && token.Error() != nil {
 		b.logger.Error("Failed to send suspend message",
-			zap.String("sessionID", sessionID),
-			zap.Error(token.Error()))
+			slog.String("sessionID", sessionID),
+			slog.Any("error", token.Error()))
 		return NewBridgeError("suspend", "failed to send suspend message", token.Error())
 	}
 
@@ -221,8 +221,8 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 
 	token = b.mqttClient.Subscribe(suspendResponseTopic, b.qos, func(c mqtt.Client, m mqtt.Message) {
 		b.logger.Debug("Received suspend response",
-			zap.String("topic", m.Topic()),
-			zap.String("payload", string(m.Payload())))
+			slog.String("topic", m.Topic()),
+			slog.String("payload", string(m.Payload())))
 
 		msgParts := strings.Split(string(m.Payload()), ":")
 		if len(msgParts) > 0 && msgParts[0] == "error" {
@@ -235,8 +235,8 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 
 	if token.Wait() && token.Error() != nil {
 		b.logger.Error("Failed to subscribe to suspend response",
-			zap.String("sessionID", sessionID),
-			zap.Error(token.Error()))
+			slog.String("sessionID", sessionID),
+			slog.Any("error", token.Error()))
 		return NewBridgeError("suspend", "failed to subscribe to suspend topic", token.Error())
 	}
 
@@ -245,16 +245,16 @@ func (b *MQTTNetBridge) SuspendSession(sessionID string) error {
 	case err := <-done:
 		if err != nil {
 			b.logger.Error("Suspend request failed",
-				zap.String("sessionID", sessionID),
-				zap.Error(err))
+				slog.String("sessionID", sessionID),
+				slog.Any("error", err))
 			return err
 		}
 		b.sessionManager.SuspendSession(sessionID, session.ClientID)
-		b.logger.Info("Session suspended successfully", zap.String("sessionID", sessionID))
+		b.logger.Info("Session suspended successfully", slog.String("sessionID", sessionID))
 		return nil
 	case <-time.After(100 * time.Millisecond):
 		b.logger.Info("Session suspend request timed out, assuming success",
-			zap.String("sessionID", sessionID))
+			slog.String("sessionID", sessionID))
 		return nil
 	}
 }
@@ -266,6 +266,6 @@ func (b *MQTTNetBridge) ResumeSession(ctx context.Context, targetBridgeID, sessi
 		return nil, NewSessionActiveError("resume", sessionID)
 	}
 
-	b.logger.Info("Resuming session", zap.String("sessionID", sessionID))
+	b.logger.Info("Resuming session", slog.String("sessionID", sessionID))
 	return b.Dial(ctx, targetBridgeID, WithSessionID(sessionID), WithSessionState(BridgeSessionStateActive))
 }

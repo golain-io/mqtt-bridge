@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	bridge "github.com/golain-io/mqtt-bridge"
@@ -22,8 +22,7 @@ import (
 
 func TestSQLiteHook(t *testing.T) {
 	// Setup logger
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Helper function to create a new hook instance
 	createHook := func(t *testing.T, dbPath string) *SQLiteHook {
@@ -264,8 +263,7 @@ func echoHandler(t *testing.T, conn net.Conn) {
 
 func TestBridgeSessionLoading(t *testing.T) {
 	// Setup logger
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create temp SQLite database and hook
 	dbPath := "test_bridge_loading.db"

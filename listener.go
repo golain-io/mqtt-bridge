@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -11,14 +12,13 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
 	"google.golang.org/grpc/resolver"
 )
 
 // MQTTNetBridge implements net.Listener over MQTT
 type MQTTNetBridge struct {
 	mqttClient      mqtt.Client
-	logger          *zap.Logger
+	logger          *slog.Logger
 	bridgeID        string // Our "listening address"
 	clientID        string // The client ID of the bridge
 	rootTopic       string
@@ -87,7 +87,7 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...BridgeOpt
 	cfg := &BridgeConfig{
 		rootTopic:       defaultRootTopic,
 		qos:             defaultQoS,
-		logger:          zap.NewNop(),
+		logger:          NopLogger(),
 		mqttClient:      mqttClient,
 		cleanUpInterval: defaultCleanUpInterval,
 	}
@@ -120,8 +120,8 @@ func NewMQTTNetBridge(mqttClient mqtt.Client, bridgeID string, opts ...BridgeOpt
 	token := bridge.mqttClient.Subscribe(handshakeTopic, bridge.qos, bridge.handleHandshake)
 	if token.Wait() && token.Error() != nil {
 		bridge.logger.Error("Failed to subscribe to handshake topic",
-			zap.String("topic", handshakeTopic),
-			zap.Error(token.Error()))
+			slog.String("topic", handshakeTopic),
+			slog.Any("error", token.Error()))
 		return nil
 	}
 
@@ -145,8 +145,8 @@ func (b *MQTTNetBridge) Accept() (net.Conn, error) {
 			return nil, fmt.Errorf("listener closed")
 		}
 		b.logger.Info("Accepted new connection",
-			zap.String("sessionID", conn.sessionID),
-			zap.String("remoteAddr", conn.remoteAddr.String()))
+			slog.String("sessionID", conn.sessionID),
+			slog.String("remoteAddr", conn.remoteAddr.String()))
 
 		if b.proxyAddr != nil {
 			// Try to connect to the proxy target with retries
@@ -156,9 +156,9 @@ func (b *MQTTNetBridge) Accept() (net.Conn, error) {
 				// Check if socket file exists before attempting connection
 				if _, err := os.Stat(b.proxyAddr.String()); err != nil {
 					b.logger.Debug("Socket file not found, retrying",
-						zap.String("address", b.proxyAddr.String()),
-						zap.Int("retries_left", retries-1),
-						zap.Error(err))
+						slog.String("address", b.proxyAddr.String()),
+						slog.Int("retries_left", retries-1),
+						slog.Any("error", err))
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
@@ -168,9 +168,9 @@ func (b *MQTTNetBridge) Accept() (net.Conn, error) {
 					break
 				}
 				b.logger.Debug("Failed to connect to proxy target, retrying",
-					zap.String("address", b.proxyAddr.String()),
-					zap.Int("retries_left", retries-1),
-					zap.Error(err))
+					slog.String("address", b.proxyAddr.String()),
+					slog.Int("retries_left", retries-1),
+					slog.Any("error", err))
 				time.Sleep(100 * time.Millisecond)
 			}
 			if err != nil {
@@ -179,8 +179,8 @@ func (b *MQTTNetBridge) Accept() (net.Conn, error) {
 			}
 
 			b.logger.Debug("Connected to proxy target",
-				zap.String("network", b.proxyAddr.Network()),
-				zap.String("address", b.proxyAddr.String()))
+				slog.String("network", b.proxyAddr.Network()),
+				slog.String("address", b.proxyAddr.String()))
 
 			go b.proxyConn(proxyConn, conn)
 
@@ -203,7 +203,7 @@ func (b *MQTTNetBridge) Close() error {
 	b.closed = true
 	b.closeMu.Unlock()
 
-	b.logger.Info("Closing MQTT bridge", zap.String("bridgeID", b.bridgeID))
+	b.logger.Info("Closing MQTT bridge", slog.String("bridgeID", b.bridgeID))
 	b.cancel() // Cancel the context
 
 	// Wait for in-flight conn.Close cleanup before suspending sessions.
@@ -212,8 +212,8 @@ func (b *MQTTNetBridge) Close() error {
 	for id, clientID := range b.sessionManager.ActiveSessionClientIDs() {
 		if err := b.sessionManager.SuspendSession(id, clientID); err != nil {
 			b.logger.Error("Failed to suspend session during shutdown",
-				zap.String("sessionID", id),
-				zap.Error(err))
+				slog.String("sessionID", id),
+				slog.Any("error", err))
 		}
 	}
 
@@ -243,26 +243,26 @@ func (b *MQTTNetBridge) AddHook(hook BridgeHook, config any) error {
 	}
 
 	b.logger.Info("Adding hook to bridge",
-		zap.String("hook", hook.ID()),
-		zap.String("bridgeID", b.bridgeID))
+		slog.String("hook", hook.ID()),
+		slog.String("bridgeID", b.bridgeID))
 
 	// First add the hook
 	if err := b.hooks.Add(hook, config); err != nil {
 		b.logger.Error("Failed while adding hook",
-			zap.String("hook", hook.ID()),
-			zap.Error(err))
+			slog.String("hook", hook.ID()),
+			slog.Any("error", err))
 		return err
 	}
 
 	// Then check if it implements SessionStore
 	if store, ok := hook.(ISessionStore); ok {
 		b.logger.Info("Hook implements SessionStore, updating session manager",
-			zap.String("hook", hook.ID()))
+			slog.String("hook", hook.ID()))
 
 		if err := b.sessionManager.UpdateStore(store); err != nil {
 			b.logger.Error("Failed to update session store",
-				zap.String("hook", hook.ID()),
-				zap.Error(err))
+				slog.String("hook", hook.ID()),
+				slog.Any("error", err))
 			// Continue even if store update fails since the hook is already added
 		}
 	}

@@ -3,11 +3,10 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 // SessionInfo tracks session state and metadata
@@ -31,7 +30,7 @@ type ISessionStore interface {
 // SessionManager handles session lifecycle and state management
 type SessionManager struct {
 	bridge *MQTTNetBridge
-	logger *zap.Logger
+	logger *slog.Logger
 
 	// Session storage
 	store ISessionStore
@@ -46,7 +45,7 @@ type SessionManager struct {
 }
 
 // NewSessionManager creates a new session manager
-func NewSessionManager(bridge *MQTTNetBridge, logger *zap.Logger, cleanUpInterval time.Duration) *SessionManager {
+func NewSessionManager(bridge *MQTTNetBridge, logger *slog.Logger, cleanUpInterval time.Duration) *SessionManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Initialize with default values
@@ -102,9 +101,9 @@ func (sm *SessionManager) loadSessions() error {
 
 		sm.sessions[id] = session
 		sm.logger.Info("Loaded session from storage",
-			zap.String("sessionID", id),
-			zap.String("state", session.State.String()),
-			zap.String("clientID", session.ClientID))
+			slog.String("sessionID", id),
+			slog.String("state", session.State.String()),
+			slog.String("clientID", session.ClientID))
 	}
 
 	return nil
@@ -222,7 +221,7 @@ func (sm *SessionManager) SuspendSession(sessionID string, clientID string) erro
 	if sm.bridge.hooks != nil {
 		if err := sm.bridge.hooks.OnSessionSuspended(session); err != nil {
 			sm.logger.Error("Failed to execute OnSessionSuspended hooks",
-				zap.Error(err))
+				slog.Any("error", err))
 		}
 	}
 
@@ -279,7 +278,7 @@ func (sm *SessionManager) DisconnectSession(sessionID string) error {
 	if sm.bridge.hooks != nil {
 		if err := sm.bridge.hooks.OnSessionDisconnected(session); err != nil {
 			sm.logger.Error("Failed to execute OnSessionDisconnected hooks",
-				zap.Error(err))
+				slog.Any("error", err))
 		}
 	}
 
@@ -289,9 +288,9 @@ func (sm *SessionManager) DisconnectSession(sessionID string) error {
 	sm.sessionsMu.Unlock()
 
 	sm.logger.Info("Disconnected session",
-		zap.String("sessionID", sessionID),
-		zap.String("clientID", clientID),
-		zap.String("targetBridgeID", remoteAddr))
+		slog.String("sessionID", sessionID),
+		slog.String("clientID", clientID),
+		slog.String("targetBridgeID", remoteAddr))
 
 	// Close connection
 	if conn != nil {
@@ -317,10 +316,10 @@ func (sm *SessionManager) CleanupStaleSessions() {
 			session.State == BridgeSessionStateClosed {
 			delete(sm.sessions, id)
 			sm.logger.Debug("Cleaned up stale session",
-				zap.String("sessionID", id),
-				zap.String("state", session.State.String()),
-				zap.Duration("sessionTimeout", timeout),
-				zap.Duration("timeSinceSuspended", time.Since(session.LastSuspended)))
+				slog.String("sessionID", id),
+				slog.String("state", session.State.String()),
+				slog.Duration("sessionTimeout", timeout),
+				slog.Duration("timeSinceSuspended", time.Since(session.LastSuspended)))
 		}
 	}
 }
@@ -385,9 +384,9 @@ func (sm *SessionManager) HandleSessionError(sessionID string, errorType string)
 	}
 
 	sm.logger.Warn("Session error",
-		zap.String("sessionID", sessionID),
-		zap.String("errorType", errorType),
-		zap.Error(err))
+		slog.String("sessionID", sessionID),
+		slog.String("errorType", errorType),
+		slog.Any("error", err))
 
 	return err
 }
@@ -395,25 +394,25 @@ func (sm *SessionManager) HandleSessionError(sessionID string, errorType string)
 // HandleDisconnect processes a disconnect message for a session
 func (sm *SessionManager) HandleDisconnect(clientID, sessionID string) error {
 	sm.logger.Debug("Handling session disconnect",
-		zap.String("sessionID", sessionID))
+		slog.String("sessionID", sessionID))
 
 	session, exists := sm.GetSession(sessionID)
 	if !exists {
 		sm.logger.Debug("No session found for disconnect",
-			zap.String("sessionID", sessionID))
+			slog.String("sessionID", sessionID))
 		return NewSessionNotFoundError("disconnect", sessionID)
 	}
 
 	sm.logger.Debug("Found session for disconnect",
-		zap.String("sessionID", sessionID),
-		zap.String("currentState", session.State.String()))
+		slog.String("sessionID", sessionID),
+		slog.String("currentState", session.State.String()))
 
 	// Verify the client owns this session
 	if session.ClientID != clientID {
 		sm.logger.Warn("Unauthorized disconnect attempt",
-			zap.String("sessionID", sessionID),
-			zap.String("sessionClientID", session.ClientID),
-			zap.String("requestingClientID", clientID))
+			slog.String("sessionID", sessionID),
+			slog.String("sessionClientID", session.ClientID),
+			slog.String("requestingClientID", clientID))
 		return NewUnauthorizedError("disconnect", sessionID)
 	}
 
@@ -422,8 +421,8 @@ func (sm *SessionManager) HandleDisconnect(clientID, sessionID string) error {
 	}
 
 	sm.logger.Info("Disconnecting session",
-		zap.String("sessionID", sessionID),
-		zap.String("clientID", clientID))
+		slog.String("sessionID", sessionID),
+		slog.String("clientID", clientID))
 
 	// Mark as suspended and update timestamp
 	session.State = BridgeSessionStateSuspended
@@ -437,7 +436,7 @@ func (sm *SessionManager) HandleDisconnect(clientID, sessionID string) error {
 	}
 
 	sm.logger.Debug("Marked session as suspended",
-		zap.String("sessionID", sessionID))
+		slog.String("sessionID", sessionID))
 
 	return nil
 }
@@ -448,14 +447,14 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 	msgType := msgParts[0]
 
 	sm.logger.Info("Received lifecycle msg",
-		zap.String("type", msgType))
+		slog.String("type", msgType))
 
 	switch msgType {
 	case suspendAckMsg:
 		if len(msgParts) < 2 {
 			sm.logger.Error("Invalid suspend ack format",
-				zap.String("topic", topic),
-				zap.String("payload", string(payload)))
+				slog.String("topic", topic),
+				slog.String("payload", string(payload)))
 			return
 		}
 		sessionID := msgParts[1]
@@ -465,8 +464,8 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 	case resumeAckMsg:
 		if len(msgParts) < 2 {
 			sm.logger.Error("Invalid resume ack format",
-				zap.String("topic", topic),
-				zap.String("payload", string(payload)))
+				slog.String("topic", topic),
+				slog.String("payload", string(payload)))
 			return
 		}
 		sessionID := msgParts[1]
@@ -480,13 +479,13 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 	case disconnectAckMsg:
 		if len(msgParts) < 2 {
 			sm.logger.Error("Invalid disconnect ack format",
-				zap.String("topic", topic),
-				zap.String("payload", string(payload)))
+				slog.String("topic", topic),
+				slog.String("payload", string(payload)))
 			return
 		}
 		sessionID := msgParts[1]
 		sm.logger.Info("Received disconnect ack",
-			zap.String("sessionID", sessionID))
+			slog.String("sessionID", sessionID))
 
 		sm.sessionsMu.Lock()
 		if session, exists := sm.sessions[sessionID]; exists {
@@ -509,12 +508,12 @@ func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 	case errorMsg:
 		if len(msgParts) < 2 {
 			sm.logger.Error("Invalid error message format",
-				zap.String("topic", topic),
-				zap.String("payload", string(payload)))
+				slog.String("topic", topic),
+				slog.String("payload", string(payload)))
 			return
 		}
 		sm.logger.Error("Received error message",
-			zap.String("error", string(payload)))
+			slog.String("error", string(payload)))
 	}
 }
 
@@ -540,7 +539,7 @@ func (sm *SessionManager) HandleConnectionEstablished(sessionID string, conn *MQ
 		if sm.bridge.hooks != nil {
 			if err := sm.bridge.hooks.OnSessionResumed(session); err != nil {
 				sm.logger.Error("Failed to execute OnSessionResumed hooks",
-					zap.Error(err))
+					slog.Any("error", err))
 			}
 		}
 	} else {
@@ -561,7 +560,7 @@ func (sm *SessionManager) HandleConnectionEstablished(sessionID string, conn *MQ
 		if sm.bridge.hooks != nil {
 			if err := sm.bridge.hooks.OnSessionCreated(session); err != nil {
 				sm.logger.Error("Failed to execute OnSessionCreated hooks",
-					zap.Error(err))
+					slog.Any("error", err))
 			}
 		}
 	}
@@ -610,13 +609,13 @@ func (sm *SessionManager) UpdateStore(store ISessionStore) error {
 		// Update or add the session
 		sm.sessions[id] = storedSession
 		sm.logger.Info("Loaded/Updated session from storage",
-			zap.String("sessionID", id),
-			zap.String("state", storedSession.State.String()),
-			zap.String("clientID", storedSession.ClientID))
+			slog.String("sessionID", id),
+			slog.String("state", storedSession.State.String()),
+			slog.String("clientID", storedSession.ClientID))
 	}
 
 	sm.logger.Info("Loaded/Updated sessions from storage",
-		zap.Int("count", len(sm.sessions)))
+		slog.Int("count", len(sm.sessions)))
 
 	return nil
 }
