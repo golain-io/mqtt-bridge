@@ -68,6 +68,9 @@ func (b *MQTTNetBridge) Dial(ctx context.Context, targetBridgeID string, opts ..
 	if token.Wait() && token.Error() != nil {
 		return nil, fmt.Errorf("handshake subscribe failed: %v", token.Error())
 	}
+	// ponytail: Dial subscribes per attempt; without unsubscribe the client accumulates
+	// handshake response topics (see devicebridge pool.go). Drop after ack or error.
+	defer func() { b.mqttClient.Unsubscribe(responseTopic) }()
 
 	// Send handshake message
 	handshakeTopic := fmt.Sprintf(handshakeRequestTopic, b.rootTopic, targetBridgeID, clientID)
