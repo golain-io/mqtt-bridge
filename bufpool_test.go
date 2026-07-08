@@ -56,10 +56,10 @@ func TestPutGetSameClass(t *testing.T) {
 
 func TestPutBufNonClassIsNoop(t *testing.T) {
 	// Non-power-of-two and out-of-range capacities must be dropped silently.
-	putBuf(make([]byte, 0, 100))     // not a power of two
-	putBuf(make([]byte, 0, 32))      // below min class
-	putBuf(make([]byte, 0))          // zero cap
-	putBuf(make([]byte, 0, 1<<21))   // above max class
+	putBuf(make([]byte, 0, 100))   // not a power of two
+	putBuf(make([]byte, 0, 32))    // below min class
+	putBuf(make([]byte, 0))        // zero cap
+	putBuf(make([]byte, 0, 1<<21)) // above max class
 }
 
 func TestGetBufNonPositive(t *testing.T) {

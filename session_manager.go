@@ -391,56 +391,6 @@ func (sm *SessionManager) HandleSessionError(sessionID string, errorType string)
 	return err
 }
 
-// HandleDisconnect processes a disconnect message for a session
-func (sm *SessionManager) HandleDisconnect(clientID, sessionID string) error {
-	sm.logger.Debug("Handling session disconnect",
-		slog.String("sessionID", sessionID))
-
-	session, exists := sm.GetSession(sessionID)
-	if !exists {
-		sm.logger.Debug("No session found for disconnect",
-			slog.String("sessionID", sessionID))
-		return NewSessionNotFoundError("disconnect", sessionID)
-	}
-
-	sm.logger.Debug("Found session for disconnect",
-		slog.String("sessionID", sessionID),
-		slog.String("currentState", session.State.String()))
-
-	// Verify the client owns this session
-	if session.ClientID != clientID {
-		sm.logger.Warn("Unauthorized disconnect attempt",
-			slog.String("sessionID", sessionID),
-			slog.String("sessionClientID", session.ClientID),
-			slog.String("requestingClientID", clientID))
-		return NewUnauthorizedError("disconnect", sessionID)
-	}
-
-	if session.State != BridgeSessionStateActive {
-		return NewSessionActiveError("disconnect", sessionID)
-	}
-
-	sm.logger.Info("Disconnecting session",
-		slog.String("sessionID", sessionID),
-		slog.String("clientID", clientID))
-
-	// Mark as suspended and update timestamp
-	session.State = BridgeSessionStateSuspended
-	session.LastSuspended = time.Now()
-
-	// Close connection if it exists
-	if session.Connection != nil {
-		session.Connection.closed = true
-		close(session.Connection.readBuf)
-		session.Connection = nil
-	}
-
-	sm.logger.Debug("Marked session as suspended",
-		slog.String("sessionID", sessionID))
-
-	return nil
-}
-
 // HandleLifecycleMessage processes lifecycle messages for sessions
 func (sm *SessionManager) HandleLifecycleMessage(payload []byte, topic string) {
 	msgParts := strings.Split(UnsafeString(payload), ":")

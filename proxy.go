@@ -33,12 +33,15 @@ func (b *MQTTNetBridge) ListenOnUnixSocket(path string, addr string) error {
 			return err
 		}
 
-		// proxy the connection to the bridge
 		bConn, err := b.Dial(b.ctx, addr)
 		if err != nil {
-			return err
+			b.logger.Error("Failed to dial bridge for unix proxy",
+				slog.String("addr", addr),
+				slog.Any("error", err))
+			conn.Close()
+			continue
 		}
-		b.proxyConn(conn, bConn)
+		go b.proxyConn(conn, bConn)
 	}
 }
 

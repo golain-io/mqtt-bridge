@@ -40,9 +40,9 @@ type MQTTNetBridge struct {
 	proxyAddr net.Addr
 
 	// Add mutex and closed flag for safe shutdown
-	closeMu      sync.Mutex
-	closed       bool
-	connCleanup  sync.WaitGroup
+	closeMu     sync.Mutex
+	closed      bool
+	connCleanup sync.WaitGroup
 }
 
 // MQTTAddr implements net.Addr for MQTT connections

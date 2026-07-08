@@ -7,9 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"log/slog"
+
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/uuid"
-	"log/slog"
 	"google.golang.org/grpc/resolver"
 )
 
@@ -253,6 +254,11 @@ func (b *MQTTNetBridge) handleSuspend(clientID, responseTopic string, msgParts [
 }
 
 func (b *MQTTNetBridge) handleDisconnect(clientID, responseTopic string, msgParts []string) {
+	if len(msgParts) < 2 {
+		b.mqttClient.Publish(responseTopic, b.qos, false, UnsafeBytes(fmt.Sprintf("%s:%s", errorMsg, errInvalidSession)))
+		return
+	}
+
 	sessionID := msgParts[1]
 
 	// Suspend the session, so that it can be resumed later, and so that it can be cleaned up by the ticker
