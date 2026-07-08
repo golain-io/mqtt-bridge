@@ -36,7 +36,10 @@ func TestHeader(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data := tt.header.marshal()
+			data, err := tt.header.marshal()
+			if err != nil {
+				t.Fatalf("Failed to marshal header: %v", err)
+			}
 			decoded, err := unmarshalHeader(data)
 			if err != nil {
 				t.Fatalf("Failed to unmarshal header: %v", err)
@@ -88,18 +91,5 @@ func TestMessage(t *testing.T) {
 				t.Errorf("Unmarshaled message doesn't match original")
 			}
 		})
-	}
-}
-
-func TestSetMaxFragmentSize(t *testing.T) {
-	originalSize := MaxFragmentSize
-	defer func() {
-		MaxFragmentSize = originalSize
-	}()
-
-	newSize := 1024
-	SetMaxFragmentSize(newSize)
-	if MaxFragmentSize != newSize {
-		t.Errorf("MaxFragmentSize = %d; want %d", MaxFragmentSize, newSize)
 	}
 }

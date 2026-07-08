@@ -208,7 +208,7 @@ func BenchmarkFrameMessage(b *testing.B) {
 			data := bytes.Repeat([]byte("a"), size)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				FrameMessage(data, uint64(i), MessageTypeData)
+				FrameMessage(data, uint64(i)+1, MessageTypeData)
 			}
 		})
 	}

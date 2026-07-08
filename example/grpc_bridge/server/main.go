@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -9,14 +10,11 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	bridge "github.com/golain-io/mqtt-bridge"
 	echo "github.com/golain-io/mqtt-bridge/example"
-	"go.uber.org/zap"
 	"google.golang.org/grpc/reflection"
 )
 
 func main() {
-	// Create logger
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create MQTT client
 	opts := mqtt.NewClientOptions().
@@ -26,7 +24,8 @@ func main() {
 	mqttClient := mqtt.NewClient(opts)
 	token := mqttClient.Connect()
 	if token.Wait() && token.Error() != nil {
-		logger.Fatal("Failed to connect to MQTT broker", zap.Error(token.Error()))
+		logger.Error("Failed to connect to MQTT broker", slog.Any("error", token.Error()))
+		os.Exit(1)
 	}
 	defer mqttClient.Disconnect(0)
 

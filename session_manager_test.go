@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
+	"os"
 	"testing"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/zap"
 )
 
 type testBridges struct {
@@ -20,8 +21,7 @@ type testBridges struct {
 
 func setupTestSessionManager(t *testing.T) (*testBridges, func()) {
 	// Setup logger
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	rootTopic := "/test"
 
@@ -482,8 +482,7 @@ func echoHandler(t *testing.T, conn net.Conn) {
 // calling conn.Close(), which then tried to acquire sessionsMu.RLock() via GetSession().
 func TestBridgeCloseDeadlock(t *testing.T) {
 	// Setup logger
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	rootTopic := "/test"
 

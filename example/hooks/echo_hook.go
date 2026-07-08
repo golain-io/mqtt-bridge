@@ -3,7 +3,7 @@ package hooks
 import (
 	"sync/atomic"
 
-	"go.uber.org/zap"
+	"log/slog"
 
 	bridge "github.com/golain-io/mqtt-bridge"
 )
@@ -11,13 +11,13 @@ import (
 // EchoHook implements BridgeHook interface to provide message logging functionality
 
 type EchoHook struct {
-	logger    *zap.Logger
+	logger    *slog.Logger
 	isRunning atomic.Bool
 	id        string
 }
 
 // NewEchoHook creates a new LoggingHook instance
-func NewEchoHook(logger *zap.Logger) *EchoHook {
+func NewEchoHook(logger *slog.Logger) *EchoHook {
 	return &EchoHook{
 		logger: logger,
 		id:     "echo_hook",
@@ -30,12 +30,12 @@ func (h *EchoHook) OnMessageReceived(msg []byte) []byte {
 		return msg
 	}
 
-	h.logger.Info("message received echo", zap.ByteString("message", msg))
+	h.logger.Info("message received echo", slog.Any("message", msg))
 	msg = msg[1:]
 
 	h.logger.Info("message received echo",
-		zap.ByteString("message", msg),
-		zap.String("hook_id", h.id))
+		slog.Any("message", msg),
+		slog.String("hook_id", h.id))
 	return msg
 }
 

@@ -1,11 +1,11 @@
 package bridge
 
 import (
+	"log/slog"
 	"net"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	"go.uber.org/zap"
 )
 
 // BridgeOption configures bridge behavior
@@ -15,7 +15,7 @@ type BridgeOption func(*BridgeConfig)
 type BridgeConfig struct {
 	rootTopic       string
 	qos             byte
-	logger          *zap.Logger
+	logger          *slog.Logger
 	mqttClient      mqtt.Client
 	rateLimit       float64
 	rateBurst       int
@@ -41,7 +41,7 @@ func WithMQTTClient(client mqtt.Client) BridgeOption {
 }
 
 // WithLogger sets the logger for the bridge
-func WithLogger(logger *zap.Logger) BridgeOption {
+func WithLogger(logger *slog.Logger) BridgeOption {
 	return func(cfg *BridgeConfig) {
 		cfg.logger = logger
 	}
@@ -90,7 +90,7 @@ func WithMaxConnections(max int) BridgeOption {
 
 func WithProxyAddr(network, addr string) BridgeOption {
 	return func(cfg *BridgeConfig) {
-		cfg.proxyAddr = &ProxyAddr{
+		cfg.proxyAddr = &MQTTAddr{
 			network: network,
 			address: addr,
 		}

@@ -7,8 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"log/slog"
+
 	_ "github.com/mattn/go-sqlite3"
-	"go.uber.org/zap"
 
 	bridge "github.com/golain-io/mqtt-bridge"
 )
@@ -16,7 +17,7 @@ import (
 // SQLiteHook implements BridgeHook interface to provide session persistence
 type SQLiteHook struct {
 	bridge.BridgeHookBase
-	logger    *zap.Logger
+	logger    *slog.Logger
 	isRunning atomic.Bool
 	id        string
 	db        *sql.DB
@@ -29,7 +30,7 @@ type SQLiteConfig struct {
 }
 
 // NewSQLiteHook creates a new SQLiteHook instance
-func NewSQLiteHook(logger *zap.Logger) *SQLiteHook {
+func NewSQLiteHook(logger *slog.Logger) *SQLiteHook {
 	return &SQLiteHook{
 		logger: logger,
 		id:     "sqlite_hook",
@@ -65,8 +66,8 @@ func (h *SQLiteHook) OnSessionCreated(session *bridge.SessionInfo) error {
 	}
 
 	h.logger.Debug("Stored new session",
-		zap.String("sessionID", session.ID),
-		zap.String("clientID", session.ClientID))
+		slog.String("sessionID", session.ID),
+		slog.String("clientID", session.ClientID))
 
 	return nil
 }
@@ -96,8 +97,8 @@ func (h *SQLiteHook) OnSessionResumed(session *bridge.SessionInfo) error {
 	}
 
 	h.logger.Debug("Updated resumed session",
-		zap.String("sessionID", session.ID),
-		zap.String("clientID", session.ClientID))
+		slog.String("sessionID", session.ID),
+		slog.String("clientID", session.ClientID))
 
 	return nil
 }
@@ -127,7 +128,7 @@ func (h *SQLiteHook) OnSessionSuspended(session *bridge.SessionInfo) error {
 	}
 
 	h.logger.Debug("Updated suspended session",
-		zap.String("sessionID", session.ID))
+		slog.String("sessionID", session.ID))
 
 	return nil
 }
@@ -157,7 +158,7 @@ func (h *SQLiteHook) OnSessionDisconnected(session *bridge.SessionInfo) error {
 	}
 
 	h.logger.Debug("Updated disconnected session",
-		zap.String("sessionID", session.ID))
+		slog.String("sessionID", session.ID))
 
 	return nil
 }
@@ -276,7 +277,7 @@ func (h *SQLiteHook) GetStoredSessions() (map[string]*bridge.SessionInfo, error)
 	}
 
 	h.logger.Debug("Retrieved stored sessions",
-		zap.Int("count", len(sessions)))
+		slog.Int("count", len(sessions)))
 
 	return sessions, nil
 }

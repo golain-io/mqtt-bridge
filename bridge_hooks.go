@@ -3,10 +3,9 @@ package bridge
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
-
-	"go.uber.org/zap"
 )
 
 const (
@@ -45,7 +44,7 @@ type BridgeHook interface {
 	Provides(b byte) bool
 
 	// SetOpts is called by the server to propagate internal values
-	SetOpts(l *zap.Logger, o *HookOptions)
+	SetOpts(l *slog.Logger, o *HookOptions)
 
 	// OnMessageReceived processes incoming messages
 	OnMessageReceived(msg []byte) []byte
@@ -73,7 +72,7 @@ type HookOptions struct {
 
 // BridgeHooks manages a collection of hooks
 type BridgeHooks struct {
-	logger   *zap.Logger
+	logger   *slog.Logger
 	internal atomic.Value // []BridgeHook
 	wg       sync.WaitGroup
 	qty      int64
@@ -115,11 +114,11 @@ func (h *BridgeHooks) GetAll() []BridgeHook {
 func (h *BridgeHooks) Stop() {
 	go func() {
 		for _, hook := range h.GetAll() {
-			h.logger.Info("stopping hook", zap.String("hook", hook.ID()))
+			h.logger.Info("stopping hook", slog.String("hook", hook.ID()))
 			if err := hook.Stop(); err != nil {
 				h.logger.Error("Failed to stop hook",
-					zap.String("hook", hook.ID()),
-					zap.Error(err))
+					slog.String("hook", hook.ID()),
+					slog.Any("error", err))
 			}
 			h.wg.Done()
 		}
@@ -167,8 +166,8 @@ func (h *BridgeHooks) OnSessionCreated(session *SessionInfo) error {
 		if hook.Provides(OnSessionCreated) {
 			if err := hook.OnSessionCreated(session); err != nil {
 				h.logger.Error("Failed to execute OnSessionCreated hook",
-					zap.String("hook", hook.ID()),
-					zap.Error(err))
+					slog.String("hook", hook.ID()),
+					slog.Any("error", err))
 				return err
 			}
 		}
@@ -185,8 +184,8 @@ func (h *BridgeHooks) OnSessionResumed(session *SessionInfo) error {
 		if hook.Provides(OnSessionResumed) {
 			if err := hook.OnSessionResumed(session); err != nil {
 				h.logger.Error("Failed to execute OnSessionResumed hook",
-					zap.String("hook", hook.ID()),
-					zap.Error(err))
+					slog.String("hook", hook.ID()),
+					slog.Any("error", err))
 				return err
 			}
 		}
@@ -203,8 +202,8 @@ func (h *BridgeHooks) OnSessionSuspended(session *SessionInfo) error {
 		if hook.Provides(OnSessionSuspended) {
 			if err := hook.OnSessionSuspended(session); err != nil {
 				h.logger.Error("Failed to execute OnSessionSuspended hook",
-					zap.String("hook", hook.ID()),
-					zap.Error(err))
+					slog.String("hook", hook.ID()),
+					slog.Any("error", err))
 				return err
 			}
 		}
@@ -221,8 +220,8 @@ func (h *BridgeHooks) OnSessionDisconnected(session *SessionInfo) error {
 		if hook.Provides(OnSessionDisconnected) {
 			if err := hook.OnSessionDisconnected(session); err != nil {
 				h.logger.Error("Failed to execute OnSessionDisconnected hook",
-					zap.String("hook", hook.ID()),
-					zap.Error(err))
+					slog.String("hook", hook.ID()),
+					slog.Any("error", err))
 				return err
 			}
 		}
@@ -240,8 +239,8 @@ func (h *BridgeHooks) StoredSessions() ([]SessionInfo, error) {
 			sessions, err := hook.StoredSessions()
 			if err != nil {
 				h.logger.Error("Failed to get stored sessions",
-					zap.String("hook", hook.ID()),
-					zap.Error(err))
+					slog.String("hook", hook.ID()),
+					slog.Any("error", err))
 				return nil, err
 			}
 			if len(sessions) > 0 {
@@ -255,7 +254,7 @@ func (h *BridgeHooks) StoredSessions() ([]SessionInfo, error) {
 // BridgeHookBase provides a set of default methods for each hook
 type BridgeHookBase struct {
 	BridgeHook
-	Log  *zap.Logger
+	Log  *slog.Logger
 	Opts *HookOptions
 }
 
@@ -275,7 +274,7 @@ func (h *BridgeHookBase) Init(config any) error {
 }
 
 // SetOpts sets the options for the hook
-func (h *BridgeHookBase) SetOpts(l *zap.Logger, opts *HookOptions) {
+func (h *BridgeHookBase) SetOpts(l *slog.Logger, opts *HookOptions) {
 	h.Log = l
 	h.Opts = opts
 }

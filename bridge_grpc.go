@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,7 +15,6 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
 	spb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -34,7 +34,7 @@ const (
 
 type MQTTBridge struct {
 	mqttClient mqtt.Client
-	logger     *zap.Logger
+	logger     *slog.Logger
 
 	// For service registration
 	servicesRW      map[string]*serviceInfo
@@ -218,7 +218,7 @@ func (b *MQTTBridge) RegisterService(desc *grpc.ServiceDesc, impl interface{}) {
 	// Subscribe to service methods after registration
 	err := b.subscribeToService(serviceName, info)
 	if err != nil {
-		b.logger.Error("Failed to subscribe to service methods", zap.Error(err), zap.String("service", serviceName))
+		b.logger.Error("Failed to subscribe to service methods", slog.Any("error", err), slog.String("service", serviceName))
 	}
 }
 
@@ -255,9 +255,9 @@ func (b *MQTTBridge) subscribeToService(serviceName string, info *serviceInfo) e
 			return fmt.Errorf("failed to subscribe to %s: %v", topic, token.Error())
 		}
 		b.logger.Info("Subscribed to method",
-			zap.String("topic", topic),
-			zap.String("service", serviceName),
-			zap.String("method", methodName))
+			slog.String("topic", topic),
+			slog.String("service", serviceName),
+			slog.String("method", methodName))
 	}
 
 	// Subscribe to streaming methods
@@ -268,9 +268,9 @@ func (b *MQTTBridge) subscribeToService(serviceName string, info *serviceInfo) e
 			return fmt.Errorf("failed to subscribe to %s: %v", topic, token.Error())
 		}
 		b.logger.Info("Subscribed to stream",
-			zap.String("topic", topic),
-			zap.String("service", serviceName),
-			zap.String("stream", streamName))
+			slog.String("topic", topic),
+			slog.String("service", serviceName),
+			slog.String("stream", streamName))
 	}
 
 	return nil
@@ -280,7 +280,7 @@ func (b *MQTTBridge) subscribeToService(serviceName string, info *serviceInfo) e
 func (b *MQTTBridge) handleMessage(client mqtt.Client, msg mqtt.Message) {
 	pkg, service, method, sessionID, direction, err := ParseTopicPath(msg.Topic())
 	if err != nil {
-		b.logger.Error("Failed to parse topic", zap.Error(err), zap.String("topic", msg.Topic()))
+		b.logger.Error("Failed to parse topic", slog.Any("error", err), slog.String("topic", msg.Topic()))
 		return
 	}
 
@@ -297,7 +297,7 @@ func (b *MQTTBridge) handleMessage(client mqtt.Client, msg mqtt.Message) {
 	b.servicesRWMutex.RUnlock()
 
 	if !exists {
-		b.logger.Error("Service not found", zap.String("service", serviceName))
+		b.logger.Error("Service not found", slog.String("service", serviceName))
 		b.sendError(pkg, service, method, sessionID, status.Error(codes.NotFound, "service not found"))
 		return
 	}
@@ -308,7 +308,7 @@ func (b *MQTTBridge) handleMessage(client mqtt.Client, msg mqtt.Message) {
 	// Parse the frame
 	frame, err := UnmarshalFrame(msg.Payload())
 	if err != nil {
-		b.logger.Error("Failed to unmarshal frame", zap.Error(err))
+		b.logger.Error("Failed to unmarshal frame", slog.Any("error", err))
 		b.sendError(pkg, service, method, sessionID, status.Error(codes.Internal, "failed to unmarshal frame"))
 		return
 	}
@@ -342,9 +342,14 @@ func (b *MQTTBridge) handleMessage(client mqtt.Client, msg mqtt.Message) {
 func (b *MQTTBridge) sendResponse(pkg, service, method, sessionID string, frame Frame) error {
 	topic := BuildTopicPath(pkg, service, method, sessionID, topicUp)
 
-	data := frame.Marshal()
-	token := b.mqttClient.Publish(topic, 1, false, data)
+	size := calculateHeaderSize(frame.Header.StreamID) + len(frame.Data)
+	buf, err := frame.appendTo(getBuf(size)[:0])
+	if err != nil {
+		return fmt.Errorf("marshal frame: %w", err)
+	}
+	token := b.mqttClient.Publish(topic, 1, false, buf)
 	token.Wait()
+	putBuf(buf)
 	return token.Error()
 }
 
@@ -358,18 +363,18 @@ func (b *MQTTBridge) sendError(pkg, service, method, sessionID string, err error
 	statusProto := st.Proto()
 	statusData, err := proto.Marshal(statusProto)
 	if err != nil {
-		b.logger.Error("Failed to marshal status", zap.Error(err))
+		b.logger.Error("Failed to marshal status", slog.Any("error", err))
 		return
 	}
 
 	frame, err := NewFrame(MessageTypeError, 0, statusData)
 	if err != nil {
-		b.logger.Error("Failed to create error frame", zap.Error(err))
+		b.logger.Error("Failed to create error frame", slog.Any("error", err))
 		return
 	}
 
 	if err := b.sendResponse(pkg, service, method, sessionID, *frame); err != nil {
-		b.logger.Error("Failed to send error response", zap.Error(err))
+		b.logger.Error("Failed to send error response", slog.Any("error", err))
 	}
 }
 
@@ -522,24 +527,24 @@ func (b *MQTTBridge) handleSessionEvent(session *Session, event SessionEvent) {
 	switch event {
 	case SessionEventCreated:
 		b.logger.Info("Session created",
-			zap.String("session_id", session.ID),
-			zap.String("service", session.ServiceName))
+			slog.String("session_id", session.ID),
+			slog.String("service", session.ServiceName))
 
 	case SessionEventStreamStarted:
 		b.logger.Info("Stream started",
-			zap.String("session_id", session.ID))
+			slog.String("session_id", session.ID))
 
 	case SessionEventStreamEnded:
 		b.logger.Info("Stream ended",
-			zap.String("session_id", session.ID))
+			slog.String("session_id", session.ID))
 
 	case SessionEventTimeout:
 		b.logger.Warn("Session timed out",
-			zap.String("session_id", session.ID))
+			slog.String("session_id", session.ID))
 
 	case SessionEventClosed:
 		b.logger.Info("Session closed",
-			zap.String("session_id", session.ID))
+			slog.String("session_id", session.ID))
 	}
 }
 
@@ -581,8 +586,16 @@ func (b *MQTTBridge) closeSession(sessionID string) {
 
 // handleUnaryCall processes a unary RPC call
 func (b *MQTTBridge) handleUnaryCall(pkg, service string, methodDesc *grpc.MethodDesc, session *Session, frame Frame) {
+	b.servicesRWMutex.RLock()
+	svcInfo, ok := b.servicesRW[fmt.Sprintf("%s.%s", pkg, service)]
+	b.servicesRWMutex.RUnlock()
+	if !ok {
+		b.sendError(pkg, service, methodDesc.MethodName, session.ID,
+			status.Error(codes.NotFound, "service not found"))
+		return
+	}
+	serviceImpl := svcInfo.serviceImpl
 	ctx := context.Background()
-	serviceImpl := b.servicesRW[fmt.Sprintf("%s.%s", pkg, service)].serviceImpl
 
 	// Call the handler
 	resp, err := methodDesc.Handler(serviceImpl, ctx, func(req interface{}) error {
@@ -614,8 +627,8 @@ func (b *MQTTBridge) handleUnaryCall(pkg, service string, methodDesc *grpc.Metho
 	// Send response
 	if err := b.sendResponse(pkg, service, methodDesc.MethodName, session.ID, *responseFrame); err != nil {
 		b.logger.Error("Failed to send response",
-			zap.Error(err),
-			zap.String("session", session.ID))
+			slog.Any("error", err),
+			slog.String("session", session.ID))
 	}
 }
 
@@ -656,15 +669,15 @@ func (b *MQTTBridge) handleStreamInit(pkg, service string, streamDesc *grpc.Stre
 		WithStreamID(streamCtx.StreamID))
 	if err != nil {
 		b.logger.Error("Failed to create stream init ack frame",
-			zap.Error(err),
-			zap.String("session", session.ID))
+			slog.Any("error", err),
+			slog.String("session", session.ID))
 		return
 	}
 
 	if err := b.sendResponse(pkg, service, streamDesc.StreamName, session.ID, *ackFrame); err != nil {
 		b.logger.Error("Failed to send stream init ack",
-			zap.Error(err),
-			zap.String("session", session.ID))
+			slog.Any("error", err),
+			slog.String("session", session.ID))
 	}
 }
 
@@ -687,8 +700,8 @@ func (b *MQTTBridge) handleStreamMessage(pkg, service string, streamDesc *grpc.S
 	stream, ok := streamCtx.Extra.(*serverStream)
 	if !ok {
 		b.logger.Error("Stream context does not contain serverStream",
-			zap.String("session", session.ID),
-			zap.String("stream", streamCtx.StreamID))
+			slog.String("session", session.ID),
+			slog.String("stream", streamCtx.StreamID))
 		return
 	}
 
@@ -699,8 +712,8 @@ func (b *MQTTBridge) handleStreamMessage(pkg, service string, streamDesc *grpc.S
 	default:
 		// Buffer is full, log warning and drop message
 		b.logger.Warn("Stream receive buffer full, dropping message",
-			zap.String("session", session.ID),
-			zap.String("stream", streamCtx.StreamID))
+			slog.String("session", session.ID),
+			slog.String("stream", streamCtx.StreamID))
 	}
 }
 
@@ -709,9 +722,9 @@ func (b *MQTTBridge) handleStreamEnd(pkg, service string, streamDesc *grpc.Strea
 	err := session.CloseStream(frame.Header.StreamID)
 	if err != nil {
 		b.logger.Error("Failed to close stream",
-			zap.Error(err),
-			zap.String("session", session.ID),
-			zap.String("stream", frame.Header.StreamID))
+			slog.Any("error", err),
+			slog.String("session", session.ID),
+			slog.String("stream", frame.Header.StreamID))
 	}
 }
 
@@ -868,7 +881,7 @@ func (s *serverStream) RecvMsg(m interface{}) error {
 	}
 }
 
-func NewMQTTBridge(mqttClient mqtt.Client, logger *zap.Logger, timeout time.Duration) *MQTTBridge {
+func NewMQTTBridge(mqttClient mqtt.Client, logger *slog.Logger, timeout time.Duration) *MQTTBridge {
 	return &MQTTBridge{
 		mqttClient:  mqttClient,
 		logger:      logger,

@@ -69,60 +69,60 @@ var (
 )
 
 // Error constructors for common operations
-func NewSessionActiveError(sessionID string) error {
+func NewSessionActiveError(op, sessionID string) error {
 	return &SessionError{
 		BridgeError: BridgeError{
-			Op:      "dial",
+			Op:      op,
 			Message: ErrSessionActive.Message,
 		},
 		SessionID: sessionID,
 	}
 }
 
-func NewSessionNotFoundError(sessionID string) error {
+func NewSessionNotFoundError(op, sessionID string) error {
 	return &SessionError{
 		BridgeError: BridgeError{
-			Op:      "dial",
+			Op:      op,
 			Message: ErrSessionNotFound.Message,
 		},
 		SessionID: sessionID,
 	}
 }
 
-func NewInvalidSessionError(sessionID string) error {
+func NewInvalidSessionError(op, sessionID string) error {
 	return &SessionError{
 		BridgeError: BridgeError{
-			Op:      "dial",
+			Op:      op,
 			Message: ErrInvalidSession.Message,
 		},
 		SessionID: sessionID,
 	}
 }
 
-func NewSessionSuspendedError(sessionID string) error {
+func NewSessionSuspendedError(op, sessionID string) error {
 	return &SessionError{
 		BridgeError: BridgeError{
-			Op:      "dial",
+			Op:      op,
 			Message: ErrSessionSuspended.Message,
 		},
 		SessionID: sessionID,
 	}
 }
 
-func NewUnauthorizedError(sessionID string) error {
+func NewUnauthorizedError(op, sessionID string) error {
 	return &SessionError{
 		BridgeError: BridgeError{
-			Op:      "dial",
+			Op:      op,
 			Message: ErrUnauthorized.Message,
 		},
 		SessionID: sessionID,
 	}
 }
 
-func NewConnectionFailedError(sessionID string, err error) error {
+func NewConnectionFailedError(op, sessionID string, err error) error {
 	return &SessionError{
 		BridgeError: BridgeError{
-			Op:      "dial",
+			Op:      op,
 			Message: ErrConnectionFailed.Message,
 			Err:     err,
 		},

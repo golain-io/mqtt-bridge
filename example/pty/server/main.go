@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -14,12 +15,11 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	bridge "github.com/golain-io/mqtt-bridge"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
 	"golang.org/x/term"
 )
 
 // shellSession handles an interactive shell session
-func shellSession(ctx context.Context, cmdReader io.ReadWriter) error {
+func shellSession(ctx context.Context, logger *slog.Logger, cmdReader io.ReadWriter) error {
 	cmd := exec.Command("/bin/bash")
 	cmd.Env = os.Environ()
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -34,7 +34,7 @@ func shellSession(ctx context.Context, cmdReader io.ReadWriter) error {
 	defer ptmx.Close()
 
 	// Handle PTY window size changes
-	if err := handlePTYResize(ptmx); err != nil {
+	if err := handlePTYResize(logger, ptmx); err != nil {
 		return fmt.Errorf("setup pty resize: %w", err)
 	}
 
@@ -62,15 +62,14 @@ func shellSession(ctx context.Context, cmdReader io.ReadWriter) error {
 }
 
 // handlePTYResize sets up window size handling for the PTY
-func handlePTYResize(ptmx *os.File) error {
+func handlePTYResize(logger *slog.Logger, ptmx *os.File) error {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
 
 	go func() {
 		for range ch {
 			if err := pty.InheritSize(os.Stdin, ptmx); err != nil {
-				// Log error but continue
-				zap.L().Error("resize pty", zap.Error(err))
+				logger.Error("resize pty", slog.Any("error", err))
 			}
 		}
 	}()
@@ -97,14 +96,14 @@ func waitCmdAsync(cmd *exec.Cmd) <-chan error {
 
 // server represents the SSH server instance
 type server struct {
-	logger      *zap.Logger
+	logger      *slog.Logger
 	bridge      *bridge.MQTTNetBridge
 	mqttClient  mqtt.Client
 	activeConns sync.Map
 }
 
 // newServer creates and initializes a new server instance
-func newServer(logger *zap.Logger) (*server, error) {
+func newServer(logger *slog.Logger) (*server, error) {
 	opts := mqtt.NewClientOptions().
 		AddBroker("tcp://localhost:1883").
 		SetClientID("ssh-server-" + uuid.New().String())
@@ -135,7 +134,7 @@ func (s *server) run(ctx context.Context) error {
 		default:
 			conn, err := s.bridge.Accept()
 			if err != nil {
-				s.logger.Error("accept connection", zap.Error(err))
+				s.logger.Error("accept connection", slog.Any("error", err))
 				continue
 			}
 
@@ -151,10 +150,10 @@ func (s *server) run(ctx context.Context) error {
 func (s *server) handleConnection(ctx context.Context, conn io.ReadWriter, id uuid.UUID) {
 	defer s.activeConns.Delete(id)
 
-	if err := shellSession(ctx, conn); err != nil {
+	if err := shellSession(ctx, s.logger, conn); err != nil {
 		s.logger.Error("shell session error",
-			zap.Error(err),
-			zap.String("connection_id", id.String()),
+			slog.Any("error", err),
+			slog.String("connection_id", id.String()),
 		)
 	}
 }
@@ -174,12 +173,12 @@ func (s *server) cleanup() {
 }
 
 func main() {
-	logger, _ := zap.NewProduction()
-	defer logger.Sync()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	srv, err := newServer(logger)
 	if err != nil {
-		logger.Fatal("initialize server", zap.Error(err))
+		logger.Error("initialize server", slog.Any("error", err))
+		os.Exit(1)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -195,6 +194,7 @@ func main() {
 	}()
 
 	if err := srv.run(ctx); err != nil && err != context.Canceled {
-		logger.Fatal("server error", zap.Error(err))
+		logger.Error("server error", slog.Any("error", err))
+		os.Exit(1)
 	}
 }

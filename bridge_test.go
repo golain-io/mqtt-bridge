@@ -1,11 +1,12 @@
 package bridge
 
 import (
+	"log/slog"
+	"os"
 	"testing"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	"go.uber.org/zap"
 
 	echo "github.com/golain-io/mqtt-bridge/example"
 )
@@ -22,8 +23,7 @@ func setupTestBridge(t *testing.T) (*MQTTBridge, echo.EchoServiceServer) {
 		t.Fatalf("Failed to connect to MQTT broker: %v", token.Error())
 	}
 
-	// Create logger
-	logger, _ := zap.NewDevelopment()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Create bridge
 	bridge := NewMQTTBridge(mqttClient, logger, 30*time.Second)
